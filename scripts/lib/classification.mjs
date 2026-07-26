@@ -1,11 +1,8 @@
 const FIELD_NAMES = ["Priority", "Workflow", "Effort", "Wave"];
+const EFFORT_RANK = {XS: 1, S: 2, M: 3, L: 4, XL: 5};
 
 function normalize(value) {
   return String(value ?? "").trim().toLowerCase();
-}
-
-function hasOwn(object, key) {
-  return Object.prototype.hasOwnProperty.call(object, key);
 }
 
 function hasValue(value) {
@@ -20,7 +17,7 @@ function issueLabels(issue) {
 }
 
 function setIfMissing(proposed, sources, field, value, source) {
-  if (!hasOwn(proposed, field) && hasValue(value)) {
+  if (!hasValue(proposed[field]) && hasValue(value)) {
     proposed[field] = value;
     sources[field] = source;
   }
@@ -30,15 +27,30 @@ function overrideKey(issue) {
   return `${issue.repository}#${issue.number}`;
 }
 
-function openPullRequest(issue) {
-  return (Array.isArray(issue.linkedPullRequests) ? issue.linkedPullRequests : [])
-    .some((pullRequest) => normalize(pullRequest?.state) === "open" && pullRequest?.merged === false);
+function linkedPullRequestWorkflow(issue) {
+  const pullRequests = Array.isArray(issue.linkedPullRequests) ? issue.linkedPullRequests : [];
+  if (pullRequests.some((pullRequest) => normalize(pullRequest?.state) === "open" && pullRequest?.merged !== true)) {
+    return {value: "In progress", source: "rule: linked open pull request"};
+  }
+  if (pullRequests.some((pullRequest) => pullRequest?.merged === true || normalize(pullRequest?.state) === "merged")) {
+    return {value: "Validation", source: "rule: linked merged pull request"};
+  }
+  return undefined;
 }
 
 function priorityFromLabels(labels, rules) {
   const priorities = (Array.isArray(rules.priorityLabels) ? rules.priorityLabels : [])
     .map((priority) => ({priority, normalized: normalize(priority)}));
   return priorities.find(({normalized}) => labels.includes(normalized) || labels.includes(`priority:${normalized}`));
+}
+
+function priorityFromTitle(title, rules) {
+  const match = String(title ?? "").match(/^\s*(?:\[\s*(p[0-5])\s*\]|(p[0-5])\s*:)/i);
+  if (!match) return undefined;
+  const normalized = normalize(match[1] ?? match[2]);
+  const priorities = (Array.isArray(rules.priorityLabels) ? rules.priorityLabels : [])
+    .map((priority) => ({priority, normalized: normalize(priority)}));
+  return priorities.find(({normalized: candidate}) => candidate === normalized);
 }
 
 function waveFromLabels(labels, rules) {
@@ -69,6 +81,7 @@ export function classifyIssue(issue, rules = {}, overrides = {}) {
   const proposed = {...current};
   const sources = Object.fromEntries(Object.keys(proposed).map((field) => [field, "existing"]));
   const warnings = [];
+  const unresolvedFields = new Set();
   const labels = issueLabels(issue);
   const override = overrides && typeof overrides === "object" ? overrides[overrideKey(issue)] : undefined;
 
@@ -89,13 +102,19 @@ export function classifyIssue(issue, rules = {}, overrides = {}) {
     setIfMissing(proposed, sources, "Wave", "Futuro", "rule: frozen label");
   }
 
-  if (openPullRequest(issue)) {
-    setIfMissing(proposed, sources, "Workflow", "In progress", "rule: linked open pull request");
+  const pullRequestWorkflow = linkedPullRequestWorkflow(issue);
+  if (pullRequestWorkflow) {
+    setIfMissing(proposed, sources, "Workflow", pullRequestWorkflow.value, pullRequestWorkflow.source);
   }
 
   const priority = priorityFromLabels(labels, rules);
   if (priority) {
     setIfMissing(proposed, sources, "Priority", priority.priority, `rule: label ${priority.normalized}`);
+  } else {
+    const titlePriority = priorityFromTitle(issue.title, rules);
+    if (titlePriority) {
+      setIfMissing(proposed, sources, "Priority", titlePriority.priority, `rule: title prefix ${titlePriority.normalized}`);
+    }
   }
 
   const wave = waveFromLabels(labels, rules);
@@ -106,17 +125,30 @@ export function classifyIssue(issue, rules = {}, overrides = {}) {
   const text = `${issue.title ?? ""}\n${issue.body ?? ""}`.toLowerCase();
   const matches = effortMatches(text, rules);
   if (matches.length > 0) {
-    const first = matches[0];
-    setIfMissing(proposed, sources, "Effort", first.effort, `rule: effort pattern ${first.pattern}`);
-    const distinctEfforts = [...new Set(matches.map(({effort}) => effort))];
-    if (distinctEfforts.length > 1) {
-      warnings.push(`Effort ambigua: ${distinctEfforts.join(", ")}`);
+    const unranked = matches.filter(({effort}) => !EFFORT_RANK[effort]);
+    if (unranked.length > 0) {
+      unresolvedFields.add("Effort");
+      warnings.push(`Effort sem ranking: ${unranked.map(({effort}) => effort).join(", ")}`);
+    } else {
+      const largest = matches.reduce((selected, match) =>
+        EFFORT_RANK[match.effort] > EFFORT_RANK[selected.effort] ? match : selected
+      );
+      const distinctEfforts = [...new Set(matches.map(({effort}) => effort))];
+      const source = distinctEfforts.length > 1
+        ? `rule: effort maior ${largest.effort} (pattern ${largest.pattern})`
+        : `rule: effort pattern ${largest.pattern}`;
+      setIfMissing(proposed, sources, "Effort", largest.effort, source);
+      if (distinctEfforts.length > 1) {
+        warnings.push(`Effort signals conflitantes; selecionado maior ${largest.effort}`);
+      }
     }
   }
 
   setIfMissing(proposed, sources, "Priority", "P2", "default");
   setIfMissing(proposed, sources, "Workflow", "Backlog", "default");
-  setIfMissing(proposed, sources, "Effort", "M", "default");
+  if (!unresolvedFields.has("Effort")) {
+    setIfMissing(proposed, sources, "Effort", "M", "default");
+  }
   setIfMissing(proposed, sources, "Wave", defaultWave(proposed.Priority), "default by Priority");
 
   for (const field of FIELD_NAMES) {

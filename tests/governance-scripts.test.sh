@@ -11,6 +11,8 @@ classifier_rules="${root_dir}/config/issue-classification-rules.json"
 classifier_overrides="${root_dir}/config/issue-classification-overrides.json"
 classifier_test="${root_dir}/tests/classification.test.mjs"
 
+grep -qxF '.worktrees/' "${root_dir}/.gitignore"
+
 test -f "${classifier_runtime}"
 test -f "${classifier_rules}"
 test -f "${classifier_overrides}"
