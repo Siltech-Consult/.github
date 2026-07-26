@@ -18,7 +18,10 @@ command -v jq >/dev/null || {
 if [[ -n "${REPOSITORIES:-}" ]]; then
   IFS=',' read -r -a repos <<<"${REPOSITORIES}"
 else
-  mapfile -t repos < <(
+  repos=()
+  while IFS= read -r repo; do
+    repos+=("${repo}")
+  done < <(
     gh repo list "${ORG}" \
       --limit 1000 \
       --json name,isArchived \
