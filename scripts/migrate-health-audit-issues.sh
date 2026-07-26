@@ -22,12 +22,12 @@ fields="$(
 priority_field_id="$(
   jq -r '.[] | select(.name == "Priority") | .id' <<<"${fields}"
 )"
-status_field_id="$(
-  jq -r '.[] | select(.name == "Status") | .id' <<<"${fields}"
+workflow_field_id="$(
+  jq -r '.[] | select(.name == "Workflow") | .id' <<<"${fields}"
 )"
 
-if [[ -z "${priority_field_id}" || -z "${status_field_id}" ]]; then
-  echo "Erro: configure Priority e Status antes da migracao." >&2
+if [[ -z "${priority_field_id}" || -z "${workflow_field_id}" ]]; then
+  echo "Erro: configure Priority e Workflow antes da migracao." >&2
   exit 1
 fi
 
@@ -102,12 +102,12 @@ migrate_issue() {
   payload="$(
     jq -n \
       --argjson priority_field_id "${priority_field_id}" \
-      --argjson status_field_id "${status_field_id}" \
+      --argjson workflow_field_id "${workflow_field_id}" \
       --arg priority "${priority}" \
       '{
         issue_field_values: [
           {field_id:$priority_field_id,value:$priority},
-          {field_id:$status_field_id,value:"Backlog"}
+          {field_id:$workflow_field_id,value:"Backlog"}
         ]
       }'
   )"

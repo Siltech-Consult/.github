@@ -153,12 +153,12 @@ else
   patch_field "${effort_id}" "${effort_payload}"
 fi
 
-status_field="$(field_by_name "Status")"
-if [[ -z "${status_field}" ]]; then
-  echo "Criando Status"
+workflow_field="$(field_by_name "Workflow")"
+if [[ -z "${workflow_field}" ]]; then
+  echo "Criando Workflow"
   create_field "$(
     jq -n '{
-      name: "Status",
+      name: "Workflow",
       description: "Estado atual do fluxo de trabalho",
       data_type: "single_select",
       options: [
@@ -173,7 +173,7 @@ if [[ -z "${status_field}" ]]; then
     }'
   )"
 else
-  echo "Status ja existe; preservado"
+  echo "Workflow ja existe; preservado"
 fi
 
 wave_field="$(field_by_name "Wave")"

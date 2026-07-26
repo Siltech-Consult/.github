@@ -10,7 +10,7 @@ Use recursos nativos da organizacao para classificacoes de planejamento:
 
 - Issue Type: `Bug`, `Feature` ou `Task`.
 - Priority: `P0`, `P1`, `P2`, `P3`, `P4` ou `P5`.
-- Status: `Backlog`, `Ready`, `In progress`, `Blocked`, `Validation`,
+- Workflow: `Backlog`, `Ready`, `In progress`, `Blocked`, `Validation`,
   `Frozen` ou `Done`.
 - Effort: `XS`, `S`, `M`, `L` ou `XL`.
 - Wave: `Onda 1`, `Onda 2` ou `Futuro`.
@@ -55,7 +55,8 @@ Ele preserva os IDs das opcoes existentes durante a migracao:
 - Priority: `Urgent -> P0`, `High -> P1`, `Medium -> P2`, `Low -> P3`.
 - Effort: `Low -> S`, `Medium -> M`, `High -> L`.
 
-Depois acrescenta `P4/P5`, `XS/XL`, `Status` e `Wave`.
+Depois acrescenta `P4/P5`, `XS/XL`, `Workflow` e `Wave`. O nome `Status`
+e reservado pelo GitHub e nao pode ser usado em um Issue Field customizado.
 
 Requisito: token de administrador da organizacao com escopo `admin:org` ou
 permissao granular de escrita em Issue Fields.
@@ -70,8 +71,14 @@ ser normalizadas por:
 ```
 
 O script remove o prefixo `[P0]` a `[P5]` do titulo, aplica Priority,
-Status `Backlog`, Issue Type, `area:collector` e o label `tech:*`
+Workflow `Backlog`, Issue Type, `area:collector` e o label `tech:*`
 correspondente. A execucao e idempotente.
+
+Valide toda a migracao com:
+
+```bash
+./scripts/validate-health-audit-issues.sh
+```
 
 ## Formularios
 
