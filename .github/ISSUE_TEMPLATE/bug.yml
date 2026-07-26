@@ -1,0 +1,52 @@
+name: Bug
+description: Registrar comportamento incorreto, regressao ou risco operacional.
+title: ""
+type: Bug
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema
+      description: Descreva comportamento observado e impacto.
+      placeholder: O que ocorreu e quem foi afetado?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Comportamento esperado
+      description: Descreva resultado correto.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Como reproduzir
+      description: Informe comandos, dados de entrada e sequencia minima.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidencias
+      description: Logs, screenshots, JSONs, PDFs ou links relacionados.
+    validations:
+      required: false
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencias
+      description: Issues ou repositorios que bloqueiam ou sao bloqueados.
+      placeholder: Siltech-Consult/repositorio#123
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Verificacoes
+      options:
+        - label: Pesquisei issues existentes antes de abrir esta.
+          required: true
+        - label: Nao inclui credenciais ou dados sensiveis nas evidencias.
+          required: true

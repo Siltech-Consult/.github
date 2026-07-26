@@ -1,0 +1,102 @@
+[
+  {
+    "name": "area:collector",
+    "color": "1D76DB",
+    "description": "Coleta, normalizacao ou exportacao de diagnosticos e metricas"
+  },
+  {
+    "name": "area:reporting",
+    "color": "0E8A16",
+    "description": "Geracao, conteudo ou layout de relatorios"
+  },
+  {
+    "name": "area:cmdb",
+    "color": "5319E7",
+    "description": "Cadastros, inventario ou integracao com CMDB"
+  },
+  {
+    "name": "area:storage",
+    "color": "006B75",
+    "description": "S3, arquivos, retencao ou persistencia de artefatos"
+  },
+  {
+    "name": "area:ci",
+    "color": "BFD4F2",
+    "description": "CI, testes automatizados, lint ou validacao de build"
+  },
+  {
+    "name": "area:contract",
+    "color": "C2E0C6",
+    "description": "Schema, contrato de dados ou compatibilidade entre projetos"
+  },
+  {
+    "name": "area:documentation",
+    "color": "D4C5F9",
+    "description": "Documentacao, runbook ou orientacao operacional"
+  },
+  {
+    "name": "area:security",
+    "color": "B60205",
+    "description": "Seguranca, credenciais, permissoes ou exposicao"
+  },
+  {
+    "name": "area:performance",
+    "color": "FBCA04",
+    "description": "Desempenho, consumo de recursos ou otimizacao"
+  },
+  {
+    "name": "area:deployment",
+    "color": "7057FF",
+    "description": "Empacotamento, instalacao, deploy ou operacao agendada"
+  },
+  {
+    "name": "tech:windows",
+    "color": "0078D4",
+    "description": "Tecnologia Microsoft Windows"
+  },
+  {
+    "name": "tech:linux",
+    "color": "FCC624",
+    "description": "Tecnologia Linux"
+  },
+  {
+    "name": "tech:sqlserver",
+    "color": "CC2927",
+    "description": "Tecnologia Microsoft SQL Server"
+  },
+  {
+    "name": "tech:oracle",
+    "color": "F80000",
+    "description": "Tecnologia Oracle Database"
+  },
+  {
+    "name": "tech:iis",
+    "color": "5C2D91",
+    "description": "Tecnologia Microsoft IIS"
+  },
+  {
+    "name": "tech:nginx",
+    "color": "009639",
+    "description": "Tecnologia nginx"
+  },
+  {
+    "name": "tech:aws",
+    "color": "FF9900",
+    "description": "Tecnologias e servicos AWS"
+  },
+  {
+    "name": "dependency:external",
+    "color": "D93F0B",
+    "description": "Depende de outro repositorio, fornecedor ou mudanca externa"
+  },
+  {
+    "name": "needs:evidence",
+    "color": "FBCA04",
+    "description": "Implementacao precisa de evidencia ou validacao operacional"
+  },
+  {
+    "name": "breaking-change",
+    "color": "B60205",
+    "description": "Mudanca incompativel que exige migracao coordenada"
+  }
+]

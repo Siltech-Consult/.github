@@ -1,0 +1,37 @@
+name: Task
+description: Registrar manutencao, teste, documentacao, CI ou trabalho interno.
+title: ""
+type: Task
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objetivo
+      description: Descreva trabalho e resultado esperado.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Escopo
+      description: Liste arquivos, componentes ou ambientes envolvidos.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Criterios de aceite
+      description: Liste verificacoes necessarias para concluir.
+      placeholder: |
+        - [ ] Criterio 1
+        - [ ] Criterio 2
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencias
+      description: Issues ou repositorios que bloqueiam ou sao bloqueados.
+      placeholder: Siltech-Consult/repositorio#123
+    validations:
+      required: false

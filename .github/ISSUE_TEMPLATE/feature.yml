@@ -1,0 +1,44 @@
+name: Feature
+description: Propor capacidade nova para usuario, integracao ou produto.
+title: ""
+type: Feature
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objetivo
+      description: Qual resultado novo deve existir?
+    validations:
+      required: true
+  - type: textarea
+    id: value
+    attributes:
+      label: Valor esperado
+      description: Quem ganha e qual problema passa a ser resolvido?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Escopo proposto
+      description: Inclua entradas, saidas, contratos e limites.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Criterios de aceite
+      description: Liste resultados objetivos e verificaveis.
+      placeholder: |
+        - [ ] Criterio 1
+        - [ ] Criterio 2
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencias
+      description: Issues ou repositorios que bloqueiam ou sao bloqueados.
+      placeholder: Siltech-Consult/repositorio#123
+    validations:
+      required: false

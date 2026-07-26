@@ -1,0 +1,26 @@
+name: Sync organization labels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate required secret
+        env:
+          GH_TOKEN: ${{ secrets.ORG_LABEL_SYNC_TOKEN }}
+        run: |
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "Configure ORG_LABEL_SYNC_TOKEN com acesso de escrita em Issues."
+            exit 1
+          fi
+      - name: Synchronize labels
+        env:
+          GH_TOKEN: ${{ secrets.ORG_LABEL_SYNC_TOKEN }}
+          ORG: Siltech-Consult
+        run: ./scripts/sync-labels.sh
