@@ -1,0 +1,25 @@
+{
+  "priorityLabels": ["P0", "P1", "P2", "P3", "P4", "P5"],
+  "frozenLabels": ["status:congelado"],
+  "waveLabels": {
+    "onda-1": "Onda 1",
+    "onda-2": "Onda 2",
+    "onda-3": "Futuro",
+    "fase-2": "Futuro"
+  },
+  "collectorRepositories": [
+    "Windows_Health",
+    "SQLServer_Health",
+    "Linux_Health",
+    "Oracle_Health",
+    "IIS_Health",
+    "nginx_health",
+    "aws_health"
+  ],
+  "effortPatterns": {
+    "XS": ["changelog", "comentario", "texto"],
+    "S": ["documentar", "readme", "release", "--version", "ci minimo", "migrar ci"],
+    "L": ["integrar", "migrar banco", "modulo", "arquitetura", "api m2m"],
+    "XL": ["epico", "multi-tenant", "multi-tecnologia"]
+  }
+}
