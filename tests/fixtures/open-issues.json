@@ -1,0 +1,23 @@
+[
+  {
+    "id": "I_1",
+    "repository": "Siltech-Consult/demo",
+    "number": 7,
+    "title": "[P1] Corrigir parser",
+    "body": "Falha atual",
+    "labels": ["bug"],
+    "createdAt": "2026-07-01T00:00:00Z",
+    "updatedAt": "2026-07-02T00:00:00Z",
+    "url": "https://github.com/Siltech-Consult/demo/issues/7",
+    "type": "Bug",
+    "fields": {
+      "Priority": null,
+      "Workflow": null,
+      "Effort": null,
+      "Wave": null
+    },
+    "linkedPullRequests": [
+      {"state": "OPEN", "merged": false}
+    ]
+  }
+]
