@@ -42,6 +42,37 @@ REPOSITORIES="Report-Worker,Windows_Health" ./scripts/sync-labels.sh
 O workflow `Sync organization labels` exige o secret de organizacao
 `ORG_LABEL_SYNC_TOKEN`, com permissao de escrita em Issues nos repositorios.
 
+## Campos da organizacao
+
+O script abaixo configura os campos oficiais de forma idempotente:
+
+```bash
+./scripts/configure-issue-fields.sh
+```
+
+Ele preserva os IDs das opcoes existentes durante a migracao:
+
+- Priority: `Urgent -> P0`, `High -> P1`, `Medium -> P2`, `Low -> P3`.
+- Effort: `Low -> S`, `Medium -> M`, `High -> L`.
+
+Depois acrescenta `P4/P5`, `XS/XL`, `Status` e `Wave`.
+
+Requisito: token de administrador da organizacao com escopo `admin:org` ou
+permissao granular de escrita em Issue Fields.
+
+## Migracao Health
+
+As issues abertas pela auditoria de conformidade dos coletores Health podem
+ser normalizadas por:
+
+```bash
+./scripts/migrate-health-audit-issues.sh
+```
+
+O script remove o prefixo `[P0]` a `[P5]` do titulo, aplica Priority,
+Status `Backlog`, Issue Type, `area:collector` e o label `tech:*`
+correspondente. A execucao e idempotente.
+
 ## Formularios
 
 Os formularios em `.github/ISSUE_TEMPLATE` funcionam como padrao para
