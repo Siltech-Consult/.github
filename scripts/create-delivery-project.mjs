@@ -232,13 +232,21 @@ function githubUrl(value) {
   } catch { return false; }
 }
 
+function matchesBoundProjectIdentity(manifestProject, project, organization) {
+  return manifestProject?.id === project.id &&
+    manifestProject?.number === project.number &&
+    manifestProject?.title === project.title &&
+    manifestProject?.title === DELIVERY_PROJECT_TITLE &&
+    manifestProject?.owner === project.owner &&
+    manifestProject?.owner === organization &&
+    manifestProject?.url === project.url;
+}
+
 function manifestFailure(manifest, project, organization) {
   const structure = manifestStructureFailure(manifest, organization);
   if (structure) return structure;
   if (manifest.state !== "bound") return {type: "untrusted_project_manifest"};
-  if (manifest.project?.id !== project.id || manifest.project?.title !== DELIVERY_PROJECT_TITLE || manifest.project?.owner !== organization) {
-    return {type: "untrusted_project_manifest"};
-  }
+  if (!matchesBoundProjectIdentity(manifest.project, project, organization)) return {type: "untrusted_project_manifest"};
   return null;
 }
 
@@ -292,7 +300,7 @@ export async function createOrReuseDeliveryProject({organization, runGh, apply =
         bindManifest(manifest, existing.project, organization);
         await persistManifest(writeManifest, manifestPath, manifest);
       }
-    } else if (manifest?.state === "bound" && manifest.project.id !== existing.project.id) {
+    } else if (manifest?.state === "bound" && !matchesBoundProjectIdentity(manifest.project, existing.project, organization)) {
       throw new Error("Project vinculado divergente; execute reset manual do manifest antes de continuar");
     }
     return {created: false, project: existing.project, manifest};

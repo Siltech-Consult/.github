@@ -7,9 +7,41 @@ import {
   extractProjectIssueFieldIds,
   fetchProject,
   findDeliveryProject,
-  synchronizeDeliveryProject
+  synchronizeDeliveryProject,
+  validateDeliveryProject as validateDeliveryProjectCore
 } from "../scripts/create-delivery-project.mjs";
-import { validateDeliveryProject } from "../scripts/validate-delivery-project.mjs";
+import { validateDeliveryProject as validateDeliveryProjectCli } from "../scripts/validate-delivery-project.mjs";
+
+const validateDeliveryProject = validateDeliveryProjectCli;
+
+function boundManifest(project = {}) {
+  return {
+    schemaVersion: 2,
+    state: "bound",
+    pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "bound-adversarial", timestamp: "2026-07-27T00:00:00.000Z"},
+    project: {
+      id: "PVT_1",
+      number: 7,
+      title: "Siltech Delivery",
+      owner: "Siltech-Consult",
+      url: "https://github.com/orgs/Siltech-Consult/projects/7",
+      ...project
+    },
+    issueFields: {}
+  };
+}
+
+function liveDeliveryProject() {
+  return {
+    id: "PVT_1",
+    number: 7,
+    title: "Siltech Delivery",
+    owner: "Siltech-Consult",
+    url: "https://github.com/orgs/Siltech-Consult/projects/7",
+    public: false,
+    projectFields: []
+  };
+}
 
 test("nao duplica campos nem itens existentes", () => {
   const operations = buildProjectOperations({
@@ -90,8 +122,10 @@ test("validador exige projeto privado, campos oficiais unicos e inventario compl
     organization: "Siltech-Consult",
     project: {
       id: "PVT_1",
+      number: 7,
       title: "Siltech Delivery",
       owner: "Siltech-Consult",
+      url: "https://github.com/orgs/Siltech-Consult/projects/7",
       public: false,
       projectFields: [
         {id: "PF_PRIORITY", name: "Priority", dataType: "SINGLE_SELECT"},
@@ -296,6 +330,54 @@ test("bound ID divergente falha fechado sem rebind ou create", async () => {
     }}}})
   }), /reset manual do manifest/);
   assert.equal(manifest.project.id, "PVT_RECORDED");
+});
+
+test("reuso recusa bound com ID correto e numero divergente", async () => {
+  await assert.rejects(createOrReuseDeliveryProject({
+    organization: "Siltech-Consult",
+    manifest: boundManifest({number: 8}),
+    apply: true,
+    writeManifest: async () => { throw new Error("nao deveria gravar"); },
+    runGh: async () => ({data: {organization: {id: "ORG_1", projectsV2: {
+      nodes: [{...liveDeliveryProject(), owner: {login: "Siltech-Consult"}}],
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }}}})
+  }), /reset manual do manifest/);
+});
+
+test("reuso recusa bound com ID correto e URL GitHub divergente", async () => {
+  await assert.rejects(createOrReuseDeliveryProject({
+    organization: "Siltech-Consult",
+    manifest: boundManifest({url: "https://github.com/orgs/Siltech-Consult/projects/8"}),
+    apply: true,
+    writeManifest: async () => { throw new Error("nao deveria gravar"); },
+    runGh: async () => ({data: {organization: {id: "ORG_1", projectsV2: {
+      nodes: [{...liveDeliveryProject(), owner: {login: "Siltech-Consult"}}],
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }}}})
+  }), /reset manual do manifest/);
+});
+
+test("validadores core e CLI recusam bound com ID correto e numero divergente", () => {
+  for (const validate of [validateDeliveryProjectCore, validateDeliveryProjectCli]) {
+    const audit = validate({
+      project: liveDeliveryProject(),
+      manifest: boundManifest({number: 8}),
+      complete: false
+    });
+    assert.deepEqual(audit.failures.map((failure) => failure.type), ["untrusted_project_manifest"]);
+  }
+});
+
+test("validadores core e CLI recusam bound com ID correto e URL GitHub divergente", () => {
+  for (const validate of [validateDeliveryProjectCore, validateDeliveryProjectCli]) {
+    const audit = validate({
+      project: liveDeliveryProject(),
+      manifest: boundManifest({url: "https://github.com/orgs/Siltech-Consult/projects/8"}),
+      complete: false
+    });
+    assert.deepEqual(audit.failures.map((failure) => failure.type), ["untrusted_project_manifest"]);
+  }
 });
 
 test("apply false nao grava bind de manifest pendente", async () => {
