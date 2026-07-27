@@ -5,6 +5,7 @@ import {dirname, basename, join} from "node:path";
 import {randomUUID} from "node:crypto";
 
 const execFileAsync = promisify(execFile);
+const SEARCH_LIMIT = 1000;
 const SEARCH_FIELDS = "id,repository,number,title,body,labels,createdAt,updatedAt,url";
 const FIELD_VALUE_SELECTION = `
         __typename
@@ -156,7 +157,7 @@ function runGhWithInput(executable, args, input) {
 
 function searchArgs(org) {
   return [
-    "search", "issues", "--owner", org, "--state", "open", "--limit", "1000",
+    "search", "issues", "--owner", org, "--state", "open", "--limit", String(SEARCH_LIMIT),
     "--json", SEARCH_FIELDS
   ];
 }
@@ -345,6 +346,11 @@ export async function inventoryOpenIssues({org, outputPath, runGh = createRunGh(
 
   const searchResult = await runGh(searchArgs(org));
   const searchIssues = Array.isArray(searchResult) ? searchResult : [];
+  if (searchIssues.length >= SEARCH_LIMIT) {
+    throw new Error(
+      `Busca atingiu limite de ${SEARCH_LIMIT} issues sem prova de exaustividade; inventario recusado`
+    );
+  }
   const details = new Map();
 
   for (let offset = 0; offset < searchIssues.length; offset += 100) {

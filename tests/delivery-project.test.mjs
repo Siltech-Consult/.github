@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFile} from "node:fs/promises";
+import {dirname, resolve} from "node:path";
+import {fileURLToPath} from "node:url";
 import {
   applyProjectOperations,
   buildProjectOperations,
   createOrReuseDeliveryProject,
+  DEFAULT_MANIFEST_PATH,
   extractProjectIssueFieldIds,
   fetchProject,
   findDeliveryProject,
@@ -13,6 +17,7 @@ import {
 import { validateDeliveryProject as validateDeliveryProjectCli } from "../scripts/validate-delivery-project.mjs";
 
 const validateDeliveryProject = validateDeliveryProjectCli;
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function boundManifest(project = {}) {
   return {
@@ -127,6 +132,15 @@ function createPostconditionRunGh({baselineFields = PROJECT_FIELDS, finalContent
   };
   return {calls, runGh, projectReads: () => projectReads};
 }
+
+test("manifest default survives fresh checkout with live Project identity and mappings", async () => {
+  assert.equal(DEFAULT_MANIFEST_PATH, "config/delivery-project-manifest.json");
+  const manifest = JSON.parse(await readFile(resolve(projectRoot, DEFAULT_MANIFEST_PATH), "utf8"));
+
+  assert.equal(manifest.project.number, 11);
+  assert.equal(manifest.project.url, "https://github.com/orgs/Siltech-Consult/projects/11");
+  assert.deepEqual(Object.keys(manifest.issueFields).sort(), ["Effort", "Priority", "Wave", "Workflow"]);
+});
 
 test("nao duplica campos nem itens existentes", () => {
   const operations = buildProjectOperations({
@@ -600,6 +614,9 @@ test("aplica apenas operacoes ausentes com retry por item", async () => {
     if (query.includes("createProjectV2IssueField")) {
       return {data: {createProjectV2IssueField: {projectV2Field: {id: "PF_WORKFLOW", name: "Workflow", dataType: "SINGLE_SELECT"}}}};
     }
+    if (query.includes("node(id: $projectId)")) {
+      return projectQueryResponse({contentIds: []});
+    }
     return {data: {addProjectV2ItemById: {item: {id: "PVTI_2", content: {id: contentId}}}}};
   };
 
@@ -624,7 +641,155 @@ test("aplica apenas operacoes ausentes com retry por item", async () => {
     name: "Workflow",
     dataType: "SINGLE_SELECT"
   });
-  assert.equal(checkpoints.length, 1);
+  assert.deepEqual(checkpoints.map((state) => state.pendingOperation?.kind ?? null), [
+    "add_issue_field",
+    null,
+    "add_item",
+    null
+  ]);
+});
+
+test("reconcilia associacao de campo confirmada apos resposta perdida sem repetir mutacao", async () => {
+  const workflowField = PROJECT_FIELDS.find((field) => field.name === "Workflow");
+  const manifest = boundManifest();
+  const checkpoints = [];
+  let mutations = 0;
+  let committed = false;
+
+  await applyProjectOperations({
+    projectId: "PVT_1",
+    operations: {addIssueFields: ["IF_WORKFLOW"], addItems: []},
+    fieldNamesById: {IF_WORKFLOW: "Workflow"},
+    manifest,
+    apply: true,
+    retrySleep: async () => {},
+    checkpoint: async (state) => checkpoints.push(structuredClone(state)),
+    runGh: async (args) => {
+      const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+      if (query.includes("createProjectV2IssueField")) {
+        mutations += 1;
+        if (mutations === 1) {
+          committed = true;
+          const error = new Error("response lost after commit");
+          error.status = 503;
+          throw error;
+        }
+        return {data: {createProjectV2IssueField: {projectV2Field: workflowField}}};
+      }
+      if (query.includes("node(id: $projectId)")) {
+        return projectQueryResponse({fields: committed ? [workflowField] : []});
+      }
+      throw new Error(`Consulta inesperada: ${query}`);
+    }
+  });
+
+  assert.equal(mutations, 1);
+  assert.deepEqual(manifest.issueFields.Workflow, {
+    issueFieldId: "IF_WORKFLOW",
+    projectFieldId: workflowField.id,
+    name: "Workflow",
+    dataType: "SINGLE_SELECT"
+  });
+  assert.equal(checkpoints.some((state) => state.pendingOperation?.kind === "add_issue_field"), true);
+  assert.equal(manifest.pendingOperation, null);
+});
+
+test("reconcilia item confirmado apos resposta perdida sem repetir mutacao", async () => {
+  const manifest = synchronizedManifest();
+  const checkpoints = [];
+  let mutations = 0;
+  let committed = false;
+
+  await applyProjectOperations({
+    projectId: "PVT_1",
+    operations: {addIssueFields: [], addItems: ["I_2"]},
+    manifest,
+    apply: true,
+    retrySleep: async () => {},
+    checkpoint: async (state) => checkpoints.push(structuredClone(state)),
+    runGh: async (args) => {
+      const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+      if (query.includes("addProjectV2ItemById")) {
+        mutations += 1;
+        if (mutations === 1) {
+          committed = true;
+          const error = new Error("response lost after commit");
+          error.status = 503;
+          throw error;
+        }
+        return {data: {addProjectV2ItemById: {item: {id: "PVTI_2", content: {id: "I_2"}}}}};
+      }
+      if (query.includes("node(id: $projectId)")) {
+        return projectQueryResponse({contentIds: committed ? ["I_2"] : []});
+      }
+      throw new Error(`Consulta inesperada: ${query}`);
+    }
+  });
+
+  assert.equal(mutations, 1);
+  assert.equal(checkpoints.some((state) => state.pendingOperation?.kind === "add_item"), true);
+  assert.equal(manifest.pendingOperation, null);
+});
+
+test("retomada reconcilia operacao preparada antes de validar ou repetir mutacao", async (t) => {
+  const cases = [
+    {
+      name: "campo",
+      manifest: (() => {
+        const manifest = synchronizedManifest();
+        delete manifest.issueFields.Workflow;
+        manifest.pendingOperation = {
+          kind: "add_issue_field",
+          projectId: "PVT_1",
+          issueFieldId: "IF_WORKFLOW",
+          name: "Workflow"
+        };
+        return manifest;
+      })(),
+      issues: [],
+      contentIds: []
+    },
+    {
+      name: "item",
+      manifest: {
+        ...synchronizedManifest(),
+        pendingOperation: {kind: "add_item", projectId: "PVT_1", contentId: "I_2"}
+      },
+      issues: [{id: "I_2"}],
+      contentIds: ["I_2"]
+    }
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      let mutations = 0;
+      const result = await synchronizeDeliveryProject({
+        organization: "Siltech-Consult",
+        issues: fixture.issues,
+        requiredIssueFields: REQUIRED_ISSUE_FIELDS,
+        manifest: fixture.manifest,
+        apply: true,
+        retrySleep: async () => {},
+        writeManifest: async () => {},
+        runGh: async (args) => {
+          const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+          if (query.includes("projectsV2(first: 100")) return existingProjectResponse();
+          if (query.includes("node(id: $projectId)")) {
+            return projectQueryResponse({fields: PROJECT_FIELDS, contentIds: fixture.contentIds});
+          }
+          if (query.includes("createProjectV2IssueField") || query.includes("addProjectV2ItemById")) {
+            mutations += 1;
+            throw new Error("mutacao nao deve ser repetida");
+          }
+          throw new Error(`Consulta inesperada: ${query}`);
+        }
+      });
+
+      assert.equal(mutations, 0);
+      assert.equal(result.manifest.pendingOperation, null);
+      assert.equal(result.audit.ok, true);
+    });
+  }
 });
 
 test("reconcilia postcondicao stale sem repetir mutacoes", async () => {

@@ -65,18 +65,30 @@ node scripts/validate-open-issue-classification.mjs \
 
 node scripts/create-delivery-project.mjs \
   --inventory artifacts/open-issues.json \
-  --manifest artifacts/delivery-project-manifest.json \
   --apply
 
 node scripts/validate-delivery-project.mjs \
-  --inventory artifacts/open-issues.json \
-  --manifest artifacts/delivery-project-manifest.json
+  --inventory artifacts/open-issues.json
 ```
 
 O dry-run nao altera issues. A aplicacao relê os Issue Fields antes de cada
 escrita e nunca sobrescreve `Priority`, `Workflow`, `Effort` ou `Wave` ja
 preenchidos. Nao edite manualmente os artefatos de resultado ou manifest para
 contornar essa protecao; corrija regras ou overrides e gere um novo plano.
+
+O manifest padrao do Project e o arquivo versionado
+`config/delivery-project-manifest.json`. Ele preserva a identidade do Project
+#11 e os mappings dos quatro Issue Fields sem armazenar tokens. Novas
+associacoes de campo atualizam esse arquivo e devem ser revisadas e commitadas.
+Durante associacao de campo ou inclusao de item, `pendingOperation` registra a
+intencao antes da mutacao; em resposta perdida ou retomada, o sincronizador rele
+o Project e nao repete uma operacao ja observada.
+
+Um resultado terminal de classificacao pertencente a plano anterior e
+arquivado com o digest no nome antes de iniciar o plano novo. Resultado
+pendente, falho ou incoerente bloqueia a troca. O inventario tambem falha
+fechado ao atingir o limite de 1000 resultados do `gh search issues`, pois esse
+retorno nao prova que a organizacao foi enumerada por completo.
 
 ## Rotacao de token
 

@@ -89,6 +89,11 @@ abertas da organizacao em `artifacts/open-issues.json`:
 node scripts/inventory-open-issues.mjs
 ```
 
+Como `gh search issues` limita o resultado a 1000 registros e nao fornece
+prova independente de exaustividade nesse formato, o inventario falha fechado
+quando atinge exatamente esse limite. Nesse caso, nao hidrata detalhes nem
+publica um arquivo que possa ser confundido com inventario completo.
+
 O dry-run nao altera issues, campos, labels nem projetos. Ele le o inventario,
 as regras e os overrides, depois grava o plano proposto:
 
@@ -133,6 +138,14 @@ cada issue, permitindo retomar uma aplicacao interrompida sem repetir issues
 ja concluidas. O resultado inclui um digest SHA-256 canonico do plano; apenas
 um resultado com o digest exato pode ser retomado.
 
+Quando o output padrao pertence a outro plano, uma nova aplicacao so pode
+comecar se o resultado anterior for inteiramente terminal e coerente: todos os
+itens devem estar `applied` ou `preserved`, com historico e resumo validos. O
+resultado anterior e arquivado ao lado do output como
+`issue-classification-result.<digest-anterior>.json`. Estado pendente, falho,
+malformado, duplicado ou contraditorio continua bloqueando a execucao antes de
+qualquer chamada ao GitHub.
+
 ```bash
 node scripts/apply-issue-classification.mjs \
   --plan artifacts/issue-classification-plan.json \
@@ -171,10 +184,13 @@ associa somente os quatro Issue Fields organizacionais ausentes (`Priority`,
 execucao exige `--apply`, confirma que o Project permanece privado e registra
 numero e URL no console.
 
-Cada associacao de Issue Field e gravada atomicamente em
-`artifacts/delivery-project-manifest.json`, com IDs do Issue Field e do campo
-do Project, nome e tipo. Um Project existente sem esse manifest confiavel falha
-fechado; nao e permitido inferir associacoes somente pelo nome do campo.
+Cada associacao de Issue Field e gravada atomicamente no manifest duravel e
+versionado `config/delivery-project-manifest.json`, com IDs do Issue Field e do
+campo do Project, nome e tipo. Esse arquivo ja vincula o Project #11 e e o
+padrao dos scripts de criacao e validacao, portanto uma nova clonagem preserva
+a identidade necessaria para sincronizar com seguranca. O manifest nao contem
+tokens. Um Project existente sem esse manifest confiavel falha fechado; nao e
+permitido inferir associacoes somente pelo nome do campo.
 Antes de criar Project, o manifest registra estado `pending_create`, organizacao,
 titulo, nonce e timestamp. Em erro transitivo, o processo consulta o Project por
 owner/titulo em janela limitada antes de tentar outra criacao e vincula o ID
@@ -184,10 +200,15 @@ mutacao de criacao. Estado `bound` e imutavel: ID divergente ou ausente exige
 reset manual do manifest. Execucoes sem `--apply` nao gravam nem vinculam
 manifest.
 
+Antes de associar um campo ou adicionar um item, o sincronizador grava
+`pendingOperation` no manifest. Se a resposta da mutacao for perdida, ele rele
+o Project em janela limitada e finaliza pelo estado observado antes de
+considerar qualquer retry. Uma retomada reconcilia a mesma intencao antes da
+validacao e nunca repete uma mutacao ja confirmada por leitura.
+
 ```bash
 node scripts/create-delivery-project.mjs \
   --inventory artifacts/open-issues.json \
-  --manifest artifacts/delivery-project-manifest.json \
   --apply
 ```
 
@@ -198,8 +219,7 @@ Valide o Project sem alterar dados com:
 
 ```bash
 node scripts/validate-delivery-project.mjs \
-  --inventory artifacts/open-issues.json \
-  --manifest artifacts/delivery-project-manifest.json
+  --inventory artifacts/open-issues.json
 ```
 
 O validador grava `artifacts/delivery-project-audit.json` e falha se titulo,

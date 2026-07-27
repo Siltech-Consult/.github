@@ -135,6 +135,33 @@ test("normaliza resposta GraphQL e consulta IDs em lotes de 100", async () => {
   assert.equal(issues[0].body, "");
 });
 
+test("falha fechado quando busca atinge limite de 1000 sem provar exaustividade", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "github-inventory-cap-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const outputPath = join(directory, "open-issues.json");
+  let calls = 0;
+  const searchIssues = Array.from({length: 1000}, (_, index) => ({
+    id: `I_${index}`,
+    repository: {nameWithOwner: "Siltech-Consult/demo"},
+    number: index + 1,
+    title: `Issue ${index + 1}`,
+    labels: []
+  }));
+
+  await assert.rejects(inventoryOpenIssues({
+    org: "Siltech-Consult",
+    outputPath,
+    runGh: async (args) => {
+      calls += 1;
+      if (args.includes("search")) return searchIssues;
+      return {data: {nodes: []}};
+    }
+  }), /limite de 1000.*exaustiv/i);
+
+  assert.equal(calls, 1);
+  await assert.rejects(readFile(outputPath, "utf8"));
+});
+
 test("grava inventario em arquivo temporario e renomeia ao final", async () => {
   const directory = await mkdtemp(join(tmpdir(), "github-inventory-"));
   const outputPath = join(directory, "open-issues.json");

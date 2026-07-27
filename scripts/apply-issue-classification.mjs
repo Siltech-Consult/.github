@@ -2,7 +2,7 @@
 
 import {readFile} from "node:fs/promises";
 import {fileURLToPath} from "node:url";
-import {resolve} from "node:path";
+import {basename, dirname, extname, join, resolve} from "node:path";
 import {createRunGh} from "./lib/github-client.mjs";
 import {writeJsonAtomically} from "./lib/report.mjs";
 import {isAuthoritativeTransientMutationRejection, isTransientGitHubError, withRetry} from "./lib/retry.mjs";
@@ -259,6 +259,77 @@ function validateResumeResult(plan, resumeResult, planDigest) {
   }
 }
 
+function validIsoTimestamp(value) {
+  if (typeof value !== "string" || value === "") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function validateTerminalPreviousResult(result) {
+  if (!validObject(result)) throw new Error("Resultado anterior invalido: objeto ausente");
+  if (!/^[a-f0-9]{64}$/.test(result.plan_digest ?? "")) {
+    throw new Error("Resultado anterior invalido: digest anterior malformado");
+  }
+  if (!validIsoTimestamp(result.generated_at) || !validIsoTimestamp(result.updated_at) ||
+    (result.plan_generated_at !== null && !validIsoTimestamp(result.plan_generated_at))) {
+    throw new Error("Resultado anterior invalido: timestamps anteriores malformados");
+  }
+  if (!Array.isArray(result.items)) throw new Error("Resultado anterior invalido: items ausente");
+
+  const seen = new Set();
+  for (const record of result.items) {
+    if (!validObject(record) || typeof record.repository !== "string" || record.repository === "" ||
+      !Number.isInteger(record.number) || record.number < 1) {
+      throw new Error("Resultado anterior invalido: identidade de issue malformada");
+    }
+    const key = resultItemKey(record);
+    if (seen.has(key)) throw new Error(`Resultado anterior invalido: issue duplicada ${key}`);
+    if (!["applied", "preserved"].includes(record.status)) {
+      throw new Error(`Resultado anterior nao terminal para ${key}: ${record.status ?? "ausente"}`);
+    }
+    if (!validObject(record.changed_since_plan) || !Array.isArray(record.attempted_fields) ||
+      !Array.isArray(record.attempted_field_values)) {
+      throw new Error(`Resultado anterior invalido: campos duraveis ausentes para ${key}`);
+    }
+    validateAttemptHistory(record, key);
+    validateFinalAttemptState(record, key);
+    seen.add(key);
+  }
+
+  const expectedSummary = {
+    total: result.items.length,
+    applied: result.items.filter((record) => record.status === "applied").length,
+    preserved: result.items.filter((record) => record.status === "preserved").length,
+    changed_since_plan: result.items.filter((record) => Object.keys(record.changed_since_plan).length > 0).length,
+    failed: 0,
+    pending: 0
+  };
+  if (JSON.stringify(result.summary) !== JSON.stringify(expectedSummary)) {
+    throw new Error("Resultado anterior invalido: resumo nao confere");
+  }
+}
+
+function resultArchivePath(outputPath, planDigest) {
+  const extension = extname(outputPath) || ".json";
+  const name = basename(outputPath, extname(outputPath));
+  return join(dirname(outputPath), `${name}.${planDigest}${extension}`);
+}
+
+async function prepareClassificationResume({plan, resumeResult, outputPath}) {
+  validatePlan(plan);
+  const planDigest = canonicalPlanDigest(plan);
+  if (resumeResult === undefined) return {resumeResult: undefined};
+  if (resumeResult.plan_digest === planDigest) {
+    validateResumeResult(plan, resumeResult, planDigest);
+    return {resumeResult};
+  }
+
+  validateTerminalPreviousResult(resumeResult);
+  const archivePath = resultArchivePath(outputPath, resumeResult.plan_digest);
+  await writeJsonAtomically(archivePath, resumeResult);
+  return {resumeResult: undefined, archivePath};
+}
+
 export function validateClassificationArtifacts(plan, resumeResult) {
   validatePlan(plan);
   const planDigest = canonicalPlanDigest(plan);
@@ -491,7 +562,9 @@ export async function main(argv = process.argv) {
   try {
     const plan = await readJson(planPath, "plano");
     if (!apply) throw new Error("Recusando escrita sem --apply");
-    const resumeResult = await readOptionalJson(outputPath);
+    const previousResult = await readOptionalJson(outputPath);
+    const prepared = await prepareClassificationResume({plan, resumeResult: previousResult, outputPath});
+    const resumeResult = prepared.resumeResult;
     validateClassificationArtifacts(plan, resumeResult);
     const runGh = createRunGh({executable});
     const fieldIds = await fetchOrganizationFieldIds({org: plan.organization, runGh});

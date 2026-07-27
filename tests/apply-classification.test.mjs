@@ -701,6 +701,18 @@ test("CLI valida resultado anterior antes de executar gh", async (t) => {
         ])]
       }),
       error: /status applied contradiz resultado final/
+    },
+    {
+      name: "digest diferente com estado nao terminal",
+      contents: JSON.stringify({
+        generated_at: "2026-07-26T00:00:00.000Z",
+        updated_at: "2026-07-26T00:01:00.000Z",
+        plan_generated_at: null,
+        plan_digest: "a".repeat(64),
+        summary: {total: 1, applied: 0, preserved: 0, changed_since_plan: 0, failed: 0, pending: 1},
+        items: [resumeRecord("pending", [])]
+      }),
+      error: /nao terminal/
     }
   ];
 
@@ -738,6 +750,80 @@ test("CLI valida resultado anterior antes de executar gh", async (t) => {
       await assert.rejects(readFile(markerPath, "utf8"));
     });
   }
+});
+
+test("CLI arquiva resultado terminal coerente de outro plano e inicia nova aplicacao", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "apply-classification-cli-rollover-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const oldPlan = {
+    generated_at: "2026-07-26T00:00:00.000Z",
+    organization: "Siltech-Consult",
+    summary: {ambiguous: 0},
+    items: [item]
+  };
+  const plan = {
+    generated_at: "2026-07-27T00:00:00.000Z",
+    organization: "Siltech-Consult",
+    summary: {ambiguous: 0},
+    items: [{...item, proposed: {...item.proposed, Workflow: "Ready"}}]
+  };
+  const oldDigest = canonicalPlanDigest(oldPlan);
+  const previousResult = {
+    generated_at: "2026-07-26T00:01:00.000Z",
+    updated_at: "2026-07-26T00:02:00.000Z",
+    plan_generated_at: oldPlan.generated_at,
+    plan_digest: oldDigest,
+    summary: {total: 1, applied: 1, preserved: 0, changed_since_plan: 0, failed: 0, pending: 0},
+    items: [{
+      ...resumeRecord("applied", [
+        attemptEntry("prepared", "in_flight"),
+        attemptEntry("outcome", "applied")
+      ]),
+      attempted_fields: ["Workflow", "Effort", "Wave"],
+      attempted_field_values: attemptPayload.issue_field_values
+    }]
+  };
+  const planPath = join(directory, "plan.json");
+  const outputPath = join(directory, "result.json");
+  const archivePath = join(directory, `result.${oldDigest}.json`);
+  const ghPath = join(directory, "gh");
+  await Promise.all([
+    writeFile(planPath, JSON.stringify(plan), "utf8"),
+    writeFile(outputPath, JSON.stringify(previousResult), "utf8"),
+    writeFile(ghPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+let body;
+if (args.some((arg) => arg.includes("orgs/Siltech-Consult/issue-fields"))) {
+  body = ["Priority", "Workflow", "Effort", "Wave"].map((name, index) => ({name, id: index + 1}));
+} else if (args.includes("--method")) {
+  body = {};
+} else {
+  body = [];
+}
+process.stdout.write("HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n" + JSON.stringify(body));
+`, "utf8")
+  ]);
+  await chmod(ghPath, 0o755);
+
+  const result = await new Promise((resolveResult, reject) => {
+    const child = spawn(process.execPath, [
+      applyScript,
+      "--plan", planPath,
+      "--output", outputPath,
+      "--gh", ghPath,
+      "--apply"
+    ], {cwd: projectRoot});
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => resolveResult({code, stderr}));
+  });
+
+  assert.deepEqual(result, {code: 0, stderr: ""});
+  assert.deepEqual(JSON.parse(await readFile(archivePath, "utf8")), previousResult);
+  const currentResult = JSON.parse(await readFile(outputPath, "utf8"));
+  assert.equal(currentResult.plan_digest, canonicalPlanDigest(plan));
+  assert.equal(currentResult.summary.applied, 1);
 });
 
 test("auditoria aponta campos ausentes, mudanca, opcao invalida e inventario divergente", () => {

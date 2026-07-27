@@ -9,7 +9,7 @@ import {isTransientGitHubError, withRetry} from "./lib/retry.mjs";
 import {CLASSIFICATION_FIELDS, fetchOrganizationFields} from "./apply-issue-classification.mjs";
 
 export const DELIVERY_PROJECT_TITLE = "Siltech Delivery";
-export const DEFAULT_MANIFEST_PATH = "artifacts/delivery-project-manifest.json";
+export const DEFAULT_MANIFEST_PATH = "config/delivery-project-manifest.json";
 export const MANIFEST_SCHEMA_VERSION = 2;
 const CREATE_DELAYS = [1000, 2000, 4000, 8000];
 
@@ -179,7 +179,8 @@ function pendingCreateManifest({organization, runNonce, now}) {
     state: "pending_create",
     pendingCreate: {organization, title: DELIVERY_PROJECT_TITLE, runNonce, timestamp: now()},
     project: null,
-    issueFields: {}
+    issueFields: {},
+    pendingOperation: null
   };
 }
 
@@ -187,6 +188,7 @@ function bindManifest(manifest, project, organization) {
   manifest.state = "bound";
   manifest.project = {id: project.id, number: project.number ?? null, title: DELIVERY_PROJECT_TITLE, owner: organization, url: project.url ?? null};
   manifest.issueFields ??= {};
+  manifest.pendingOperation ??= null;
   return manifest;
 }
 
@@ -208,13 +210,32 @@ function manifestStructureFailure(manifest, organization) {
       return {type: "invalid_project_manifest", reason: `mapping invalido para ${name}`};
     }
   }
+  const operation = manifest.pendingOperation;
+  if (operation !== undefined && operation !== null) {
+    if (!operation || typeof operation !== "object" || Array.isArray(operation) ||
+      !["add_issue_field", "add_item"].includes(operation.kind) ||
+      typeof operation.projectId !== "string" || operation.projectId === "") {
+      return {type: "invalid_project_manifest", reason: "pendingOperation invalida"};
+    }
+    if (operation.kind === "add_issue_field" &&
+      (typeof operation.issueFieldId !== "string" || operation.issueFieldId === "" ||
+        !CLASSIFICATION_FIELDS.includes(operation.name))) {
+      return {type: "invalid_project_manifest", reason: "pendingOperation de campo invalida"};
+    }
+    if (operation.kind === "add_item" && (typeof operation.contentId !== "string" || operation.contentId === "")) {
+      return {type: "invalid_project_manifest", reason: "pendingOperation de item invalida"};
+    }
+  }
   if (manifest.state === "pending_create") {
     if (manifest.project !== null) return {type: "invalid_project_manifest", reason: "Project pendente nao pode ter ID"};
     if (Object.keys(manifest.issueFields).length !== 0) return {type: "invalid_project_manifest", reason: "Project pendente nao pode ter mappings"};
+    if (operation) return {type: "invalid_project_manifest", reason: "Project pendente nao pode ter operacao"};
   } else if (!manifest.project || typeof manifest.project !== "object" || typeof manifest.project.id !== "string" || manifest.project.id === "" ||
     !Number.isInteger(manifest.project.number) || manifest.project.number < 1 || !githubUrl(manifest.project.url) ||
     manifest.project.title !== DELIVERY_PROJECT_TITLE || manifest.project.owner !== pending.organization) {
     return {type: "invalid_project_manifest", reason: "Project vinculado invalido"};
+  } else if (operation && operation.projectId !== manifest.project.id) {
+    return {type: "invalid_project_manifest", reason: "pendingOperation pertence a outro Project"};
   }
   return null;
 }
@@ -382,6 +403,103 @@ async function reconcileExactProject({organization, runGh, retrySleep}) {
   return null;
 }
 
+function samePreparedOperation(left, right) {
+  return left?.kind === right.kind &&
+    left?.projectId === right.projectId &&
+    left?.issueFieldId === right.issueFieldId &&
+    left?.name === right.name &&
+    left?.contentId === right.contentId;
+}
+
+function observePreparedOperation(project, operation) {
+  if (operation.kind === "add_issue_field") {
+    const matches = (project.projectFields ?? []).filter((field) => field?.name === operation.name);
+    if (matches.length > 1) throw new Error(`Mais de um campo ${operation.name} encontrado durante reconciliacao`);
+    return matches.length === 1 ? {field: matches[0]} : null;
+  }
+  const matches = (project.rawItems ?? []).filter((item) => item?.content?.id === operation.contentId);
+  if (matches.length > 1) throw new Error(`Mais de um item ${operation.contentId} encontrado durante reconciliacao`);
+  return matches.length === 1 ? {item: matches[0]} : null;
+}
+
+function mutationObservation(response, operation) {
+  if (operation.kind === "add_issue_field") {
+    return {field: data(response).createProjectV2IssueField?.projectV2Field};
+  }
+  return {item: data(response).addProjectV2ItemById?.item};
+}
+
+async function finalizePreparedOperation({manifest, operation, observation, checkpoint}) {
+  if (operation.kind === "add_issue_field") {
+    const field = observation?.field;
+    if (!field?.id) throw new Error("ID do campo do Project ausente");
+    if (field.name !== operation.name || !field.dataType) {
+      throw new Error(`Resposta invalida para campo ${operation.name}`);
+    }
+    manifest.issueFields[operation.name] = {
+      issueFieldId: operation.issueFieldId,
+      projectFieldId: field.id,
+      name: field.name,
+      dataType: field.dataType
+    };
+  } else {
+    const item = observation?.item;
+    if (!item?.id) throw new Error("ID do item do Project ausente");
+    if (item.content?.id !== operation.contentId) {
+      throw new Error("content ID inesperado na resposta do Project");
+    }
+  }
+  manifest.pendingOperation = null;
+  await checkpoint(manifest);
+}
+
+async function reconcilePreparedOperation({projectId, manifest, operation, runGh, retrySleep, checkpoint}) {
+  for (let readAttempt = 0; readAttempt <= CREATE_DELAYS.length; readAttempt += 1) {
+    const project = await fetchProject({projectId, runGh});
+    const observation = observePreparedOperation(project, operation);
+    if (observation) {
+      await finalizePreparedOperation({manifest, operation, observation, checkpoint});
+      return true;
+    }
+    if (readAttempt < CREATE_DELAYS.length) await retrySleep(CREATE_DELAYS[readAttempt]);
+  }
+  return false;
+}
+
+async function applyPreparedProjectMutation({projectId, manifest, operation, mutate, runGh, retrySleep, checkpoint}) {
+  if (manifest.pendingOperation) {
+    if (!samePreparedOperation(manifest.pendingOperation, operation)) {
+      throw new Error("Manifest possui outra operacao preparada; reconciliacao manual necessaria");
+    }
+    if (await reconcilePreparedOperation({projectId, manifest, operation, runGh, retrySleep, checkpoint})) return;
+  } else {
+    manifest.pendingOperation = operation;
+    await checkpoint(manifest);
+  }
+
+  for (let attempt = 0; attempt <= CREATE_DELAYS.length; attempt += 1) {
+    try {
+      const response = await mutate();
+      await finalizePreparedOperation({
+        manifest,
+        operation,
+        observation: mutationObservation(response, operation),
+        checkpoint
+      });
+      return;
+    } catch (error) {
+      try {
+        if (await reconcilePreparedOperation({projectId, manifest, operation, runGh, retrySleep, checkpoint})) return;
+      } catch (reconciliationError) {
+        error.reconciliationError = reconciliationError.message;
+        throw error;
+      }
+      if (attempt === CREATE_DELAYS.length || !isTransientGitHubError(error)) throw error;
+      await retrySleep(CREATE_DELAYS[attempt]);
+    }
+  }
+}
+
 export async function applyProjectOperations({projectId, operations, fieldNamesById = {}, manifest, runGh, apply = false, batchSize = 20, itemPauseMs = 250, batchPauseMs = 2000, sleep: pause = sleep, retrySleep = sleep, checkpoint = async () => {}} = {}) {
   if (!apply) throw new Error("Recusando escrita sem --apply");
   if (!projectId || typeof runGh !== "function" || !manifest) throw new Error("Project, runGh e manifest sao obrigatorios");
@@ -391,20 +509,31 @@ export async function applyProjectOperations({projectId, operations, fieldNamesB
   for (const entry of fields) {
     const issueFieldId = typeof entry === "string" ? entry : entry.id;
     const name = typeof entry === "string" ? fieldNamesById[entry] : entry.name;
-    const response = await withRetry(() => runGh(graphqlArgs(ADD_ISSUE_FIELD_MUTATION, {projectId, issueFieldId})), {sleep: retrySleep});
-    const field = data(response).createProjectV2IssueField?.projectV2Field;
-    if (!field?.id) throw new Error("ID do campo do Project ausente");
-    if (!name || field.name !== name || !field.dataType) throw new Error(`Resposta invalida para campo ${name ?? issueFieldId}`);
-    manifest.issueFields[name] = {issueFieldId, projectFieldId: field.id, name: field.name, dataType: field.dataType};
-    await checkpoint(manifest);
+    if (!name) throw new Error(`Nome do campo ausente para ${issueFieldId}`);
+    const operation = {kind: "add_issue_field", projectId, issueFieldId, name};
+    await applyPreparedProjectMutation({
+      projectId,
+      manifest,
+      operation,
+      mutate: () => runGh(graphqlArgs(ADD_ISSUE_FIELD_MUTATION, {projectId, issueFieldId})),
+      runGh,
+      retrySleep,
+      checkpoint
+    });
   }
   for (let index = 0; index < items.length; index += 1) {
     if (index > 0) await pause(index % batchSize === 0 ? batchPauseMs : itemPauseMs);
     const contentId = items[index];
-    const response = await withRetry(() => runGh(graphqlArgs(ADD_ITEM_MUTATION, {projectId, contentId})), {sleep: retrySleep});
-    const item = data(response).addProjectV2ItemById?.item;
-    if (!item?.id) throw new Error("ID do item do Project ausente");
-    if (item.content?.id !== contentId) throw new Error("content ID inesperado na resposta do Project");
+    const operation = {kind: "add_item", projectId, contentId};
+    await applyPreparedProjectMutation({
+      projectId,
+      manifest,
+      operation,
+      mutate: () => runGh(graphqlArgs(ADD_ITEM_MUTATION, {projectId, contentId})),
+      runGh,
+      retrySleep,
+      checkpoint
+    });
   }
 }
 
@@ -423,6 +552,17 @@ export async function synchronizeDeliveryProject({organization = "Siltech-Consul
   manifest = selected.manifest ?? manifest;
   if (!manifest && !selected.created) throw new Error(`Project existente sem manifest confiavel: ${manifestPath}`);
   const project = await fetchProject({projectId: selected.project.id, runGh});
+  if (manifest.pendingOperation) {
+    const observation = observePreparedOperation(project, manifest.pendingOperation);
+    if (observation) {
+      await finalizePreparedOperation({
+        manifest,
+        operation: manifest.pendingOperation,
+        observation,
+        checkpoint: (state) => writeManifest(manifestPath, state)
+      });
+    }
+  }
   const baseline = validateDeliveryProject({organization, project, requiredIssueFields, issues: [], manifest, complete: false});
   if (!baseline.ok) throw new Error(`Project sem estado confiavel: ${baseline.failures.map((failure) => failure.type).join(", ")}`);
   const operations = buildProjectOperations({project, requiredIssueFields, issues, manifest});

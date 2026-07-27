@@ -5,6 +5,7 @@ import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
 import {writeJsonAtomically} from "./lib/report.mjs";
 import {
+  DEFAULT_MANIFEST_PATH,
   DELIVERY_PROJECT_TITLE,
   fetchProject,
   fetchProjectIssueFieldIds,
@@ -31,7 +32,7 @@ async function readJson(path, description) {
 export async function main(argv = process.argv) {
   const inventoryPath = option("--inventory", argv) ?? "artifacts/open-issues.json";
   const outputPath = option("--output", argv) ?? "artifacts/delivery-project-audit.json";
-  const manifestPath = option("--manifest", argv) ?? "artifacts/delivery-project-manifest.json";
+  const manifestPath = option("--manifest", argv) ?? DEFAULT_MANIFEST_PATH;
   const organization = option("--organization", argv) ?? "Siltech-Consult";
   const executable = option("--gh", argv) ?? process.env.GH_BIN ?? "gh";
   try {
