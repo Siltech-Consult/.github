@@ -162,6 +162,35 @@ auditoria exige o mesmo digest do plano e exatamente um resultado terminal
 (`applied` ou `preserved`) para cada issue planejada; resultados pendentes,
 falhos, duplicados ou ausentes bloqueiam a auditoria.
 
+## Project consolidado
+
+O ProjectV2 privado `Siltech Delivery` consolida todas as issues do inventario
+aberto. A criacao procura primeiro pelo titulo, reutiliza o Project encontrado,
+associa somente os quatro Issue Fields organizacionais ausentes (`Priority`,
+`Workflow`, `Effort` e `Wave`) e inclui somente content IDs ainda ausentes. A
+execucao exige `--apply`, confirma que o Project permanece privado e registra
+numero e URL no console.
+
+```bash
+node scripts/create-delivery-project.mjs \
+  --inventory artifacts/open-issues.json \
+  --apply
+```
+
+As inclusoes usam lotes de 20 issues, pausa de dois segundos entre lotes e
+250 ms entre issues. Falhas transitivas recebem no maximo cinco tentativas.
+
+Valide o Project sem alterar dados com:
+
+```bash
+node scripts/validate-delivery-project.mjs \
+  --inventory artifacts/open-issues.json
+```
+
+O validador grava `artifacts/delivery-project-audit.json` e falha se titulo,
+owner, visibilidade, campos oficiais, nomes duplicados de campos ou content
+IDs do inventario divergirem.
+
 ## Formularios
 
 Os formularios em `.github/ISSUE_TEMPLATE` funcionam como padrao para
