@@ -95,3 +95,30 @@ test("retry usa reset de rate limit e 422 qualificado", async () => {
   assert.equal(value, "ok");
   assert.deepEqual(sleeps, [5000]);
 });
+
+test("403 com reset sem sinal de limite nao recebe retry", async () => {
+  let attempts = 0;
+  await assert.rejects(withRetry(async () => {
+    attempts += 1;
+    const error = new Error("resource not accessible");
+    error.status = 403;
+    error.headers = {"x-ratelimit-reset": "9999999999"};
+    throw error;
+  }, {sleep: async () => {}}));
+  assert.equal(attempts, 1);
+});
+
+test("422 de spam documentado recebe retry", async () => {
+  let attempts = 0;
+  const value = await withRetry(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("Validation Failed: endpoint has been spammed");
+      error.status = 422;
+      throw error;
+    }
+    return "ok";
+  }, {sleep: async () => {}});
+  assert.equal(value, "ok");
+  assert.equal(attempts, 2);
+});

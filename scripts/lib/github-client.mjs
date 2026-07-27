@@ -89,21 +89,37 @@ const PULL_REQUEST_PAGE_QUERY = `query($id: ID!, $after: String) {
 
 export function createRunGh({executable = "gh"} = {}) {
   return async (args, {input} = {}) => {
-    if (input !== undefined) return runGhWithInput(executable, args, input);
+    const commandArgs = includeResponseHeaders(args);
+    if (input !== undefined) return runGhWithInput(executable, commandArgs, input);
     try {
-      const {stdout} = await execFileAsync(executable, args, {
+      const {stdout} = await execFileAsync(executable, commandArgs, {
         maxBuffer: 32 * 1024 * 1024
       });
-      return JSON.parse(stdout);
+      return parseGhResponse(stdout);
     } catch (error) {
       throw enrichGhError(error);
     }
   };
 }
 
+function includeResponseHeaders(args) {
+  if (args[0] !== "api" || args.includes("--include")) return args;
+  return ["api", "--include", ...args.slice(1)];
+}
+
+function parseGhResponse(stdout) {
+  let response = stdout.trimStart();
+  while (/^HTTP\/\S+\s+\d{3}/i.test(response)) {
+    const separator = response.search(/\r?\n\r?\n/);
+    if (separator < 0) throw new Error("gh api response headers missing body separator");
+    response = response.slice(separator).replace(/^\r?\n\r?\n/, "");
+  }
+  return response.trim() === "" ? null : JSON.parse(response);
+}
+
 function enrichGhError(error) {
-  const output = `${error?.stderr ?? ""}\n${error?.message ?? ""}`;
-  const status = output.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+  const output = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}\n${error?.message ?? ""}`;
+  const status = output.match(/\bHTTP(?:\/\S+)?\s+(\d{3})\b/i)?.[1];
   if (status && error.status === undefined) error.status = Number(status);
   const headers = {};
   for (const line of output.split(/\r?\n/)) {
@@ -123,9 +139,13 @@ function runGhWithInput(executable, args, input) {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code !== 0) return reject(enrichGhError(new Error(stderr.trim() || `gh api exited with ${code}`)));
+      if (code !== 0) {
+        const error = new Error(stderr.trim() || `gh api exited with ${code}`);
+        error.stdout = stdout;
+        return reject(enrichGhError(error));
+      }
       try {
-        resolve(stdout.trim() === "" ? null : JSON.parse(stdout));
+        resolve(parseGhResponse(stdout));
       } catch (error) {
         reject(error);
       }

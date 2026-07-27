@@ -5,7 +5,8 @@ import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
 import {createRunGh} from "./lib/github-client.mjs";
 import {writeJsonAtomically} from "./lib/report.mjs";
-import {withRetry} from "./lib/retry.mjs";
+import {isTransientGitHubError, withRetry} from "./lib/retry.mjs";
+import {canonicalPlanDigest} from "./lib/plan-digest.mjs";
 
 export const CLASSIFICATION_FIELDS = ["Priority", "Workflow", "Effort", "Wave"];
 export const API_VERSION = "2026-03-10";
@@ -78,9 +79,18 @@ export function extractFieldIds(fields) {
   }));
 }
 
+export async function fetchOrganizationFields({org, runGh}) {
+  const fields = [];
+  for (let page = 1; ; page += 1) {
+    const response = await withRetry(() => runGh(apiArgs(`orgs/${org}/issue-fields?per_page=100&page=${page}`)));
+    const values = Array.isArray(response) ? response : response?.items ?? [];
+    fields.push(...values);
+    if (values.length < 100) return fields;
+  }
+}
+
 export async function fetchOrganizationFieldIds({org, runGh}) {
-  const fields = await withRetry(() => runGh(apiArgs(`orgs/${org}/issue-fields`)));
-  return extractFieldIds(fields);
+  return extractFieldIds(await fetchOrganizationFields({org, runGh}));
 }
 
 export async function fetchIssueFields({repository, number, runGh}) {
@@ -111,22 +121,45 @@ function updateSummary(result, total) {
   };
 }
 
-function createResult(plan, resumeResult, now) {
-  const resumable = resumeResult?.plan_generated_at === (plan.generated_at ?? null) &&
-    Array.isArray(resumeResult?.items);
+function createPendingRecord(item) {
+  return {
+    repository: item.repository,
+    number: item.number,
+    status: "pending",
+    attempted_fields: [],
+    attempted_field_values: [],
+    changed_since_plan: {},
+    attempts: []
+  };
+}
+
+function createResult(plan, resumeResult, planDigest, now) {
+  const resumable = resumeResult?.plan_digest === planDigest && Array.isArray(resumeResult?.items);
   const knownItems = new Map((resumable ? resumeResult.items : [])
     .map((item) => [resultItemKey(item), item]));
   const result = {
     generated_at: resumable ? resumeResult.generated_at : now(),
     updated_at: now(),
     plan_generated_at: plan.generated_at ?? null,
+    plan_digest: planDigest,
     summary: {},
     items: plan.items
-      .map((item) => knownItems.get(resultItemKey(item)))
-      .filter(Boolean)
+      .map((item) => structuredClone(knownItems.get(resultItemKey(item)) ?? createPendingRecord(item)))
   };
   updateSummary(result, plan.items.length);
   return result;
+}
+
+function fieldsForPayload(payload, fieldIds) {
+  return payload.issue_field_values.map(({field_id}) =>
+    CLASSIFICATION_FIELDS.find((field) => fieldIds[field] === field_id)).filter(Boolean);
+}
+
+function payloadApplied(payload, current, fieldIds) {
+  return payload.issue_field_values.every(({field_id, value}) => {
+    const field = CLASSIFICATION_FIELDS.find((name) => fieldIds[name] === field_id);
+    return field && current[field] === value;
+  });
 }
 
 export async function applyClassificationPlan({
@@ -147,57 +180,68 @@ export async function applyClassificationPlan({
   validatePlan(plan);
   if (typeof runGh !== "function") throw new Error("runGh e obrigatorio");
 
-  const result = createResult(plan, resumeResult, now);
+  const planDigest = canonicalPlanDigest(plan);
+  const result = createResult(plan, resumeResult, planDigest, now);
   await checkpoint(result);
 
   for (let index = 0; index < plan.items.length; index += 1) {
     const item = plan.items[index];
     const key = resultItemKey(item);
     let record = result.items.find((entry) => resultItemKey(entry) === key);
-    if (record?.status === "applied" || record?.status === "preserved") continue;
+    if (record.status !== "pending") continue;
     if (index > 0) await sleep(index % batchSize === 0 ? batchPauseMs : issuePauseMs);
-    if (!record) {
-      record = {
-        repository: item.repository,
-        number: item.number,
-        status: "pending",
-        attempts: 0,
-        attempted_fields: [],
-        attempted_field_values: [],
-        changed_since_plan: {}
-      };
-      result.items.push(record);
-    } else {
-      record.status = "pending";
-      delete record.error;
-    }
-    updateSummary(result, plan.items.length);
-    result.updated_at = now();
-    await checkpoint(result);
     try {
       const outcome = await withRetry(async () => {
         const current = await fetchIssueFields({...item, runGh});
         const changed_since_plan = changedFields(item.current, current);
         const payload = buildIssueFieldPayload({current, proposed: item.proposed}, fieldIds);
-        const attempted_fields = payload.issue_field_values.map(({field_id}) =>
-          CLASSIFICATION_FIELDS.find((field) => fieldIds[field] === field_id)).filter(Boolean);
+        const attempted_fields = fieldsForPayload(payload, fieldIds);
+        const attempt = {
+          attempt: record.attempts.filter((entry) => entry.phase === "prepared").length + 1,
+          phase: "prepared",
+          payload,
+          changed_since_plan,
+          outcome: payload.issue_field_values.length === 0 ? "preserved" : "in_flight"
+        };
         Object.assign(record, {
           status: "pending",
-          attempts: Number(record.attempts ?? 0) + 1,
           attempted_fields,
           attempted_field_values: payload.issue_field_values,
           changed_since_plan
         });
+        record.attempts.push(attempt);
         updateSummary(result, plan.items.length);
         result.updated_at = now();
         await checkpoint(result);
         if (payload.issue_field_values.length === 0) return {status: "preserved"};
-        await runGh(apiArgs(
-          `repos/${item.repository}/issues/${item.number}/issue-field-values`,
-          {method: "POST", input: "-"}
-        ), {input: JSON.stringify(payload)});
-        return {status: "applied"};
-      }, {sleep: retrySleep});
+        try {
+          await runGh(apiArgs(
+            `repos/${item.repository}/issues/${item.number}/issue-field-values`,
+            {method: "POST", input: "-"}
+          ), {input: JSON.stringify(payload)});
+          record.attempts.push({...attempt, phase: "outcome", outcome: "applied"});
+          return {status: "applied"};
+        } catch (error) {
+          record.attempts.push({...attempt, phase: "outcome", outcome: "uncertain", error: error.message});
+          updateSummary(result, plan.items.length);
+          result.updated_at = now();
+          await checkpoint(result);
+          try {
+            const confirmed = await fetchIssueFields({...item, runGh});
+            if (payloadApplied(payload, confirmed, fieldIds)) {
+              record.attempts.push({...attempt, phase: "outcome", outcome: "confirmed_after_uncertain"});
+              return {status: "applied"};
+            }
+          } catch (confirmationError) {
+            error.confirmation_error = confirmationError.message;
+          }
+          error.uncertainMutation = true;
+          throw error;
+        }
+      }, {
+        sleep: retrySleep,
+        shouldRetry: (error) => !error.uncertainMutation && isTransientGitHubError(error)
+      });
       record.status = outcome.status;
     } catch (error) {
       record.status = "failed";

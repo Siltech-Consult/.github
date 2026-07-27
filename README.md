@@ -130,7 +130,8 @@ Issue Fields imediatamente antes da escrita, preservando qualquer valor que
 tenha sido preenchido desde o dry-run. O resultado e gravado em
 `artifacts/issue-classification-result.json` antes da primeira mutacao e apos
 cada issue, permitindo retomar uma aplicacao interrompida sem repetir issues
-ja concluidas.
+ja concluidas. O resultado inclui um digest SHA-256 canonico do plano; apenas
+um resultado com o digest exato pode ser retomado.
 
 ```bash
 node scripts/apply-issue-classification.mjs \
@@ -156,7 +157,10 @@ A auditoria falha quando a quantidade de issues abertas mudou, algum dos
 quatro campos esta ausente, um valor anterior foi alterado ou um valor nao
 pertence as opcoes oficiais do Issue Field. Ela tambem protege valores
 registrados em `changed_since_plan` e valida novas issues abertas, mesmo que
-nao existissem no plano original.
+nao existissem no plano original. Antes de ser considerada bem-sucedida, a
+auditoria exige o mesmo digest do plano e exatamente um resultado terminal
+(`applied` ou `preserved`) para cada issue planejada; resultados pendentes,
+falhos, duplicados ou ausentes bloqueiam a auditoria.
 
 ## Formularios
 

@@ -6,7 +6,8 @@ import {resolve} from "node:path";
 import {createRunGh, inventoryOpenIssues} from "./lib/github-client.mjs";
 import {writeJsonAtomically} from "./lib/report.mjs";
 import {withRetry} from "./lib/retry.mjs";
-import {API_VERSION, CLASSIFICATION_FIELDS} from "./apply-issue-classification.mjs";
+import {canonicalPlanDigest} from "./lib/plan-digest.mjs";
+import {CLASSIFICATION_FIELDS, fetchOrganizationFields} from "./apply-issue-classification.mjs";
 
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
@@ -21,10 +22,6 @@ function issueKey(issue) {
   return `${issue.repository}#${issue.number}`;
 }
 
-function apiArgs(endpoint) {
-  return ["api", "-H", `X-GitHub-Api-Version: ${API_VERSION}`, endpoint];
-}
-
 export function extractOfficialOptions(fields) {
   const byName = new Map((Array.isArray(fields) ? fields : []).map((field) => [field?.name, field]));
   return Object.fromEntries(CLASSIFICATION_FIELDS.map((field) => {
@@ -32,6 +29,36 @@ export function extractOfficialOptions(fields) {
     if (!definition) throw new Error(`Issue Field oficial ausente: ${field}`);
     return [field, (definition.options ?? []).map((item) => item?.name).filter(hasValue)];
   }));
+}
+
+function validateResult(plan, result) {
+  const failures = [];
+  const digest = canonicalPlanDigest(plan);
+  if (result.plan_digest !== digest) {
+    failures.push({type: "result_plan_digest_mismatch", expected: digest, actual: result.plan_digest ?? null});
+  }
+  const planned = new Set(plan.items.map(issueKey));
+  const byKey = new Map();
+  for (const item of result.items) {
+    const key = issueKey(item);
+    const entries = byKey.get(key) ?? [];
+    entries.push(item);
+    byKey.set(key, entries);
+    if (!planned.has(key)) failures.push({type: "result_unplanned_issue", issue: key});
+  }
+  for (const item of plan.items) {
+    const key = issueKey(item);
+    const entries = byKey.get(key) ?? [];
+    if (entries.length === 0) {
+      failures.push({type: "result_unaccounted_issue", issue: key});
+      continue;
+    }
+    if (entries.length > 1) failures.push({type: "result_duplicate_issue", issue: key});
+    if (entries.some((entry) => entry.status !== "applied" && entry.status !== "preserved")) {
+      failures.push({type: "result_nonterminal_issue", issue: key});
+    }
+  }
+  return failures;
 }
 
 export function auditOpenIssueClassification({
@@ -46,7 +73,7 @@ export function auditOpenIssueClassification({
     throw new Error("Resultado da aplicacao deve conter items");
   }
   if (!Array.isArray(issues)) throw new Error("Inventario deve ser uma lista de issues");
-  const failures = [];
+  const failures = validateResult(plan, result);
   if (plan.items.length !== issues.length) {
     failures.push({type: "inventory_count_mismatch", planned: plan.items.length, audited: issues.length});
   }
@@ -119,7 +146,7 @@ export async function main(argv = process.argv) {
     const retryingRunGh = (args) => withRetry(() => runGh(args));
     const [issues, fields] = await Promise.all([
       inventoryOpenIssues({org: plan.organization, runGh: retryingRunGh}),
-      retryingRunGh(apiArgs(`orgs/${plan.organization}/issue-fields`))
+      fetchOrganizationFields({org: plan.organization, runGh})
     ]);
     const audit = auditOpenIssueClassification({
       plan,

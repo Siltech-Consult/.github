@@ -15,10 +15,14 @@ function headerValue(error, name) {
 
 function isRateLimited(error) {
   const message = String(error?.message ?? error?.response?.data?.message ?? "");
-  return headerValue(error, "retry-after") !== undefined ||
-    headerValue(error, "x-ratelimit-reset") !== undefined ||
-    headerValue(error, "x-ratelimit-remaining") === "0" ||
-    /secondary rate limit|rate limit|abuse detection/i.test(message);
+  const status = errorStatus(error);
+  if (status === 403) {
+    return headerValue(error, "retry-after") !== undefined ||
+      headerValue(error, "x-ratelimit-remaining") === "0" ||
+      /secondary rate limit/i.test(message);
+  }
+  return /secondary rate limit|abuse detection|abuse|spammed|spam/i.test(message) ||
+    headerValue(error, "retry-after") !== undefined;
 }
 
 export function isTransientGitHubError(error) {

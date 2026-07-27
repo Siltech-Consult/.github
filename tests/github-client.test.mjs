@@ -42,7 +42,7 @@ test("preserva status e headers de rate limit retornados pelo gh", async (t) => 
   const executable = join(directory, "gh");
   await writeFile(executable, [
     "#!/bin/sh",
-    "echo 'HTTP 403: secondary rate limit' >&2",
+    "echo 'HTTP/2.0 403 secondary rate limit' >&2",
     "echo 'Retry-After: 3' >&2",
     "exit 1"
   ].join("\n"), "utf8");
@@ -51,6 +51,39 @@ test("preserva status e headers de rate limit retornados pelo gh", async (t) => 
   await assert.rejects(createRunGh({executable})(["api", "repos/demo"]), (error) => {
     assert.equal(error.status, 403);
     assert.equal(error.headers["retry-after"], "3");
+    return true;
+  });
+});
+
+test("usa --include e preserva JSON quando gh devolve headers de sucesso", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "github-client-include-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const executable = join(directory, "gh");
+  await writeFile(executable, [
+    "#!/bin/sh",
+    "case \"$*\" in *--include*) ;; *) exit 99 ;; esac",
+    "printf 'HTTP/2.0 200 OK\\nX-RateLimit-Remaining: 42\\n\\n{\"ok\":true}\\n'"
+  ].join("\n"), "utf8");
+  await chmod(executable, 0o755);
+
+  assert.deepEqual(await createRunGh({executable})(["api", "repos/demo"]), {ok: true});
+});
+
+test("preserva headers de erro no caminho POST com stdin", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "github-client-input-error-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const executable = join(directory, "gh");
+  await writeFile(executable, [
+    "#!/bin/sh",
+    "cat >/dev/null",
+    "printf 'HTTP/2.0 429 Too Many Requests\\nRetry-After: 2\\n\\n{}\\n'",
+    "exit 1"
+  ].join("\n"), "utf8");
+  await chmod(executable, 0o755);
+
+  await assert.rejects(createRunGh({executable})(["api", "repos/demo"], {input: "{}"}), (error) => {
+    assert.equal(error.status, 429);
+    assert.equal(error.headers["retry-after"], "2");
     return true;
   });
 });
