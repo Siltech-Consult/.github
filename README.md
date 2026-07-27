@@ -80,6 +80,48 @@ Valide toda a migracao com:
 ./scripts/validate-health-audit-issues.sh
 ```
 
+## Planejamento de issues abertas
+
+O inventario consulta somente dados de leitura do GitHub e grava as issues
+abertas da organizacao em `artifacts/open-issues.json`:
+
+```bash
+node scripts/inventory-open-issues.mjs
+```
+
+O dry-run nao altera issues, campos, labels nem projetos. Ele le o inventario,
+as regras e os overrides, depois grava o plano proposto:
+
+```bash
+node scripts/classify-open-issues.mjs \
+  --input artifacts/open-issues.json \
+  --output artifacts/issue-classification-plan.json
+```
+
+Cada item do plano mostra os campos `current`, `proposed`, `sources`,
+`ambiguous` e `warnings`. O resumo informa quantos campos foram preservados e
+quantos foram propostos. Os codigos de saida sao:
+
+- `0`: plano completo, sem ambiguidades.
+- `2`: plano gravado, mas ha classificacoes ambiguas para resolver.
+- `1`: erro de leitura, configuracao ou escrita; nenhum plano confiavel foi gerado.
+
+Resolva cada ambiguidade em
+`config/issue-classification-overrides.json`, usando a chave
+`organizacao/repositorio#numero`. Todo override que definir classificacao deve
+incluir `reason`; overrides sem justificativa falham antes do dry-run.
+
+```json
+{
+  "Siltech-Consult/Report-Worker#79": {
+    "Priority": "P1",
+    "Effort": "XL",
+    "Wave": "Onda 1",
+    "reason": "Epico de fundacao que agrega entregas da Onda 1"
+  }
+}
+```
+
 ## Formularios
 
 Os formularios em `.github/ISSUE_TEMPLATE` funcionam como padrao para
