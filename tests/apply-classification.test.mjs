@@ -36,6 +36,30 @@ const item = {
   }
 };
 
+const attemptPayload = {
+  issue_field_values: [
+    {field_id: 2, value: "Backlog"},
+    {field_id: 3, value: "M"},
+    {field_id: 4, value: "Onda 1"}
+  ]
+};
+
+function attemptEntry(phase, outcome, payload = attemptPayload) {
+  return {attempt: 1, phase, payload, changed_since_plan: {}, outcome};
+}
+
+function resumeRecord(status, attempts, entry = item) {
+  return {
+    repository: entry.repository,
+    number: entry.number,
+    status,
+    attempted_fields: [],
+    attempted_field_values: [],
+    changed_since_plan: {},
+    attempts
+  };
+}
+
 function issueFieldEndpoint(args) {
   return args.find((arg) => String(arg).includes("/issue-field-values"));
 }
@@ -206,6 +230,42 @@ test("le todas as paginas de Issue Fields antes de aplicar", async () => {
   assert.equal(fields.Priority, "P1");
 });
 
+test("repete falha transitiva em pagina da leitura pre-escrita antes do POST", async () => {
+  let secondPageReads = 0;
+  let posts = 0;
+  const result = await applyClassificationPlan({
+    plan: {summary: {ambiguous: 0}, items: [item]},
+    fieldIds,
+    apply: true,
+    sleep: async () => {},
+    retrySleep: async () => {},
+    runGh: async (args) => {
+      const endpoint = issueFieldEndpoint(args);
+      if (args.includes("--method")) {
+        posts += 1;
+        return {};
+      }
+      if (endpoint.endsWith("page=1")) {
+        return Array.from({length: 100}, (_, index) => ({
+          issue_field_name: `Extra ${index}`,
+          single_select_option: {name: "unused"}
+        }));
+      }
+      secondPageReads += 1;
+      if (secondPageReads === 1) {
+        const error = new Error("service unavailable");
+        error.status = 503;
+        throw error;
+      }
+      return [{issue_field_name: "Priority", single_select_option: {name: "P1"}}];
+    }
+  });
+
+  assert.equal(secondPageReads, 2);
+  assert.equal(posts, 1);
+  assert.equal(result.items[0].status, "applied");
+});
+
 test("le todas as paginas de definicoes de Issue Fields", async () => {
   const pages = [];
   const fieldIds = await fetchOrganizationFieldIds({
@@ -296,7 +356,10 @@ test("retoma checkpoint sem repetir issue ja aplicada", async () => {
       plan_generated_at: "2026-07-27T00:00:00Z",
       plan_digest: canonicalPlanDigest({generated_at: "2026-07-27T00:00:00Z", summary: {ambiguous: 0}, items: [item, laterItem]}),
       items: [
-        {repository: item.repository, number: item.number, status: "applied", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []},
+        resumeRecord("applied", [
+          attemptEntry("prepared", "in_flight"),
+          attemptEntry("outcome", "applied")
+        ]),
         {repository: laterItem.repository, number: laterItem.number, status: "pending", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []}
       ]
     },
@@ -364,6 +427,124 @@ test("recusa artefatos de retomada duplicados, incompletos, nao planejados ou ma
       apply: true,
       resumeResult,
       runGh: async () => { calls += 1; }
+    }), /resultado anterior/i);
+    assert.equal(calls, 0);
+  }
+});
+
+test("aceita somente combinacoes terminais coerentes de status e resultado final", async () => {
+  const validCases = [
+    {
+      status: "applied",
+      attempts: [attemptEntry("prepared", "in_flight"), attemptEntry("outcome", "applied")]
+    },
+    {
+      status: "applied",
+      attempts: [attemptEntry("prepared", "in_flight"), attemptEntry("outcome", "confirmed_after_uncertain")]
+    },
+    {
+      status: "applied",
+      attempts: [
+        attemptEntry("prepared", "in_flight"),
+        attemptEntry("outcome", "uncertain"),
+        attemptEntry("confirmation", "confirmed_after_uncertain")
+      ]
+    },
+    {
+      status: "preserved",
+      attempts: [
+        attemptEntry("prepared", "preserved", {issue_field_values: []}),
+        attemptEntry("outcome", "preserved", {issue_field_values: []})
+      ]
+    },
+    {status: "failed", attempts: []},
+    {
+      status: "failed",
+      attempts: [attemptEntry("prepared", "in_flight"), attemptEntry("outcome", "authoritative_rejection")]
+    },
+    {
+      status: "failed",
+      attempts: [attemptEntry("prepared", "in_flight"), attemptEntry("outcome", "uncertain")]
+    },
+    {
+      status: "failed",
+      attempts: [
+        attemptEntry("prepared", "in_flight"),
+        attemptEntry("outcome", "uncertain"),
+        attemptEntry("confirmation", "not_applied_after_uncertain")
+      ]
+    },
+    {
+      status: "failed",
+      attempts: [
+        attemptEntry("prepared", "in_flight"),
+        attemptEntry("outcome", "uncertain"),
+        attemptEntry("confirmation", "confirmation_failed")
+      ]
+    }
+  ];
+  let calls = 0;
+
+  for (const [index, validCase] of validCases.entries()) {
+    const caseItem = {...item, number: 100 + index};
+    const plan = {summary: {ambiguous: 0}, items: [caseItem]};
+    const result = await applyClassificationPlan({
+      plan,
+      fieldIds,
+      apply: true,
+      resumeResult: {
+        plan_digest: canonicalPlanDigest(plan),
+        items: [resumeRecord(validCase.status, validCase.attempts, caseItem)]
+      },
+      runGh: async () => {
+        calls += 1;
+        throw new Error("nao deve consultar GitHub");
+      }
+    });
+
+    assert.equal(result.items[0].status, validCase.status);
+  }
+
+  assert.equal(calls, 0);
+});
+
+test("recusa status retomado que contradiz resultado final antes de consultar API", async () => {
+  const prepared = [attemptEntry("prepared", "in_flight")];
+  const rejected = [...prepared, attemptEntry("outcome", "authoritative_rejection")];
+  const uncertain = [...prepared, attemptEntry("outcome", "uncertain")];
+  const applied = [...prepared, attemptEntry("outcome", "applied")];
+  const preserved = [
+    attemptEntry("prepared", "preserved", {issue_field_values: []}),
+    attemptEntry("outcome", "preserved", {issue_field_values: []})
+  ];
+  const invalidCases = [
+    {status: "applied", attempts: rejected},
+    {status: "applied", attempts: prepared},
+    {status: "applied", attempts: uncertain},
+    {status: "preserved", attempts: rejected},
+    {status: "preserved", attempts: prepared},
+    {status: "preserved", attempts: uncertain},
+    {status: "applied", attempts: preserved},
+    {status: "preserved", attempts: applied},
+    {status: "pending", attempts: applied},
+    {status: "failed", attempts: applied}
+  ];
+  const plan = {summary: {ambiguous: 0}, items: [item]};
+
+  for (const invalidCase of invalidCases) {
+    let calls = 0;
+    await assert.rejects(applyClassificationPlan({
+      plan,
+      fieldIds,
+      apply: true,
+      resumeResult: {
+        plan_digest: canonicalPlanDigest(plan),
+        items: [resumeRecord(invalidCase.status, invalidCase.attempts)]
+      },
+      runGh: async () => {
+        calls += 1;
+        throw new Error("nao deve consultar GitHub");
+      }
     }), /resultado anterior/i);
     assert.equal(calls, 0);
   }

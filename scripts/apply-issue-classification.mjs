@@ -141,6 +141,28 @@ const RESULT_STATUSES = new Set(["pending", "applied", "preserved", "failed"]);
 const PREPARED_OUTCOMES = new Set(["in_flight", "preserved"]);
 const OUTCOME_OUTCOMES = new Set(["applied", "preserved", "authoritative_rejection", "uncertain", "confirmed_after_uncertain"]);
 const CONFIRMATION_OUTCOMES = new Set(["confirmed_after_uncertain", "not_applied_after_uncertain", "confirmation_failed"]);
+const FINAL_ATTEMPT_STATES_BY_STATUS = {
+  pending: new Set([
+    "none",
+    "prepared:in_flight",
+    "prepared:preserved",
+    "outcome:authoritative_rejection",
+    "outcome:uncertain"
+  ]),
+  applied: new Set([
+    "outcome:applied",
+    "outcome:confirmed_after_uncertain",
+    "confirmation:confirmed_after_uncertain"
+  ]),
+  preserved: new Set(["outcome:preserved"]),
+  failed: new Set([
+    "none",
+    "outcome:authoritative_rejection",
+    "outcome:uncertain",
+    "confirmation:not_applied_after_uncertain",
+    "confirmation:confirmation_failed"
+  ])
+};
 
 function validObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -196,6 +218,16 @@ function validateAttemptHistory(record, key) {
   }
 }
 
+function validateFinalAttemptState(record, key) {
+  const finalAttempt = record.attempts.at(-1);
+  const finalState = finalAttempt ? `${finalAttempt.phase}:${finalAttempt.outcome}` : "none";
+  if (!FINAL_ATTEMPT_STATES_BY_STATUS[record.status].has(finalState)) {
+    throw new Error(
+      `Resultado anterior invalido para ${key}: status ${record.status} contradiz resultado final ${finalState}`
+    );
+  }
+}
+
 function validateResumeResult(plan, resumeResult, planDigest) {
   if (!validObject(resumeResult)) throw new Error("Resultado anterior invalido: objeto ausente");
   if (resumeResult.plan_digest !== planDigest) throw new Error("Resultado anterior invalido: digest do plano nao confere");
@@ -219,6 +251,7 @@ function validateResumeResult(plan, resumeResult, planDigest) {
       throw new Error(`Resultado anterior invalido: campos duraveis ausentes para ${key}`);
     }
     validateAttemptHistory(record, key);
+    validateFinalAttemptState(record, key);
     seen.add(key);
   }
   for (const key of planned.keys()) {
@@ -352,7 +385,10 @@ export async function applyClassificationPlan({
     if (index > 0) await sleep(index % batchSize === 0 ? batchPauseMs : issuePauseMs);
     try {
       const outcome = await withRetry(async () => {
-        const current = await fetchIssueFields({...item, runGh});
+        const current = await withRetry(
+          () => fetchIssueFields({...item, runGh}),
+          {sleep: retrySleep, shouldRetry: isTransientGitHubError}
+        );
         const changed_since_plan = changedFields(item.current, current);
         const payload = buildIssueFieldPayload({current, proposed: item.proposed}, fieldIds);
         const attempted_fields = fieldsForPayload(payload, fieldIds);
