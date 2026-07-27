@@ -92,18 +92,49 @@ retorno nao prova que a organizacao foi enumerada por completo.
 
 ## Rotacao de token
 
-O workflow `Sync organization labels` usa o secret de organizacao
-`ORG_LABEL_SYNC_TOKEN`. Na rotacao:
+Os workflows `Sync organization labels` e `Organization governance` usam o
+secret `ORG_LABEL_SYNC_TOKEN` do repositorio `.github`. Para a governanca, o
+token precisa ler e escrever Issues, Issue Fields organizacionais e Projects
+da organizacao, alem de ler seus metadados.
 
-1. Crie um novo token com acesso de escrita em Issues para os repositorios da
-   organizacao, conforme o modelo de permissao adotado.
+Na rotacao:
+
+1. Crie um novo token com as permissoes exigidas pelos workflows.
 2. Atualize o secret `ORG_LABEL_SYNC_TOKEN` nas configuracoes de Actions da
    organizacao sem remover o valor atual antes de ter o novo token.
-3. Dispare manualmente `Sync organization labels` e confirme a execucao com
-   sucesso nos repositorios esperados.
+3. Dispare manualmente `Sync organization labels` e `Organization governance`
+   em modo `audit`; confirme as duas execucoes.
 4. Revogue o token anterior depois da validacao e registre a data da rotacao
    no controle operacional da organizacao.
 
 Tokens usados localmente pelos scripts devem ser fornecidos por `GH_TOKEN` ou
 pela sessao autenticada do `gh`; nao os grave em arquivos versionados, planos,
 manifestos ou artefatos.
+
+## Automacao agendada
+
+O workflow `Organization governance` roda de segunda a sexta-feira as 06:00 no
+horario de Sao Paulo (`09:00 UTC`). A agenda usa modo `apply`: inventaria as
+issues abertas, gera o plano deterministico, interrompe se houver ambiguidade,
+preenche somente campos vazios, sincroniza o Project e valida as
+pos-condicoes. Uma unica execucao pode ficar ativa; uma nova aguarda a anterior
+em vez de cancela-la.
+
+O disparo manual oferece:
+
+- `audit`: executa testes, inventario, classificacao sem escrita e auditoria do
+  Project.
+- `apply`: executa o ciclo completo usado pela agenda.
+
+Cada ciclo publica por 30 dias o inventario, plano, resultados, auditorias e
+manifest do Project como artefato da execucao. Se o manifest versionado mudar,
+o ciclo falha depois de enviar a evidencia; revise e commit a alteracao antes
+do proximo `apply`.
+
+Para o primeiro ciclo ou depois de alterar regras, overrides, token ou
+permissoes:
+
+1. Dispare `audit` e confira testes, ausencia de ambiguidades e auditoria.
+2. Dispare `apply` e acompanhe todas as etapas ate a validacao final.
+3. Baixe o artefato e preserve a URL da execucao como evidencia.
+4. Confirme no Project que itens novos e campos esperados foram sincronizados.

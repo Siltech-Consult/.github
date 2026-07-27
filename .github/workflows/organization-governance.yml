@@ -1,0 +1,126 @@
+name: Organization governance
+
+run-name: >-
+  Governance ${{ github.event_name == 'schedule' && 'scheduled apply' ||
+  format('manual {0}', inputs.mode) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Audit only or apply missing classifications and synchronize the Project"
+        required: true
+        default: audit
+        type: choice
+        options:
+          - audit
+          - apply
+  schedule:
+    # 06:00 America/Sao_Paulo, Monday through Friday.
+    - cron: "0 9 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: organization-governance
+  cancel-in-progress: false
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.ORG_LABEL_SYNC_TOKEN }}
+      ORGANIZATION: Siltech-Consult
+      RUN_MODE: ${{ github.event_name == 'schedule' && 'apply' || inputs.mode }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Validate authentication
+        run: |
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "Configure ORG_LABEL_SYNC_TOKEN with organization Issues, Issue Fields and Projects access."
+            exit 1
+          fi
+          gh auth status
+          gh api "orgs/${ORGANIZATION}" --silent
+
+      - name: Run repository tests
+        run: npm test
+
+      - name: Inventory open issues
+        run: node scripts/inventory-open-issues.mjs
+
+      - name: Build deterministic classification plan
+        run: |
+          node scripts/classify-open-issues.mjs \
+            --input artifacts/open-issues.json \
+            --output artifacts/issue-classification-plan.json
+
+      - name: Apply missing issue classifications
+        if: env.RUN_MODE == 'apply'
+        run: |
+          node scripts/apply-issue-classification.mjs \
+            --plan artifacts/issue-classification-plan.json \
+            --output artifacts/issue-classification-result.json \
+            --apply
+
+      - name: Validate applied issue classifications
+        if: env.RUN_MODE == 'apply'
+        run: |
+          node scripts/validate-open-issue-classification.mjs \
+            --plan artifacts/issue-classification-plan.json \
+            --result artifacts/issue-classification-result.json \
+            --output artifacts/issue-classification-audit.json
+
+      - name: Synchronize Siltech Delivery
+        if: env.RUN_MODE == 'apply'
+        run: |
+          node scripts/create-delivery-project.mjs \
+            --inventory artifacts/open-issues.json \
+            --manifest config/delivery-project-manifest.json \
+            --apply
+
+      - name: Validate Siltech Delivery
+        run: |
+          node scripts/validate-delivery-project.mjs \
+            --inventory artifacts/open-issues.json \
+            --manifest config/delivery-project-manifest.json \
+            --output artifacts/delivery-project-audit.json
+
+      - name: Guard durable Project manifest
+        if: env.RUN_MODE == 'apply'
+        run: |
+          if ! git diff --exit-code -- config/delivery-project-manifest.json; then
+            echo "The Project manifest changed. Review and commit the uploaded manifest before the next apply cycle."
+            exit 1
+          fi
+
+      - name: Publish execution summary
+        if: always()
+        run: |
+          {
+            echo "## Organization governance"
+            echo
+            echo "- Mode: \`${RUN_MODE}\`"
+            echo "- Organization: \`${ORGANIZATION}\`"
+            echo "- Trigger: \`${GITHUB_EVENT_NAME}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload governance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/
+            config/delivery-project-manifest.json
+          if-no-files-found: warn
+          retention-days: 30
