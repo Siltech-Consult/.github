@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "state": "bound",
+  "pendingCreate": {
+    "organization": "Siltech-Consult",
+    "title": "Siltech Delivery",
+    "runNonce": "vtiwvifdjtf",
+    "timestamp": "2026-07-27T04:16:21.432Z"
+  },
+  "project": {
+    "id": "PVT_kwDOC2bjXc4BeizI",
+    "number": 11,
+    "title": "Siltech Delivery",
+    "owner": "Siltech-Consult",
+    "url": "https://github.com/orgs/Siltech-Consult/projects/11"
+  },
+  "issueFields": {
+    "Priority": {
+      "issueFieldId": "IFSS_kgDOAeFO6g",
+      "projectFieldId": "PVTSSF_lADOC2bjXc4BeizIzhY8LhQ",
+      "name": "Priority",
+      "dataType": "SINGLE_SELECT"
+    },
+    "Workflow": {
+      "issueFieldId": "IFSS_kgDOAqpA1w",
+      "projectFieldId": "PVTSSF_lADOC2bjXc4BeizIzhY8LhU",
+      "name": "Workflow",
+      "dataType": "SINGLE_SELECT"
+    },
+    "Effort": {
+      "issueFieldId": "IFSS_kgDOAeFO7Q",
+      "projectFieldId": "PVTSSF_lADOC2bjXc4BeizIzhY8LhY",
+      "name": "Effort",
+      "dataType": "SINGLE_SELECT"
+    },
+    "Wave": {
+      "issueFieldId": "IFSS_kgDOAqpA2A",
+      "projectFieldId": "PVTSSF_lADOC2bjXc4BeizIzhY8LiQ",
+      "name": "Wave",
+      "dataType": "SINGLE_SELECT"
+    }
+  },
+  "pendingOperation": null
+}

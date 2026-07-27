@@ -80,6 +80,157 @@ Valide toda a migracao com:
 ./scripts/validate-health-audit-issues.sh
 ```
 
+## Planejamento de issues abertas
+
+O inventario consulta somente dados de leitura do GitHub e grava as issues
+abertas da organizacao em `artifacts/open-issues.json`:
+
+```bash
+node scripts/inventory-open-issues.mjs
+```
+
+Como `gh search issues` limita o resultado a 1000 registros e nao fornece
+prova independente de exaustividade nesse formato, o inventario falha fechado
+quando atinge exatamente esse limite. Nesse caso, nao hidrata detalhes nem
+publica um arquivo que possa ser confundido com inventario completo.
+
+O dry-run nao altera issues, campos, labels nem projetos. Ele le o inventario,
+as regras e os overrides, depois grava o plano proposto:
+
+```bash
+node scripts/classify-open-issues.mjs \
+  --input artifacts/open-issues.json \
+  --output artifacts/issue-classification-plan.json
+```
+
+Cada item do plano mostra os campos `current`, `proposed`, `sources`,
+`ambiguous` e `warnings`. O resumo informa quantos campos foram preservados e
+quantos foram propostos. Os codigos de saida sao:
+
+- `0`: plano completo, sem ambiguidades.
+- `2`: plano gravado, mas ha classificacoes ambiguas para resolver.
+- `1`: erro de leitura, configuracao ou escrita; nenhum plano confiavel foi gerado.
+
+Resolva cada ambiguidade em
+`config/issue-classification-overrides.json`, usando a chave
+`organizacao/repositorio#numero`. Todo override que definir classificacao deve
+incluir `reason`; overrides sem justificativa falham antes do dry-run.
+
+```json
+{
+  "Siltech-Consult/Report-Worker#79": {
+    "Priority": "P1",
+    "Effort": "XL",
+    "Wave": "Onda 1",
+    "reason": "Epico de fundacao que agrega entregas da Onda 1"
+  }
+}
+```
+
+## Aplicacao e auditoria da classificacao
+
+A aplicacao usa apenas o plano completo, sem ambiguidades, e requer a
+confirmacao explicita `--apply`. Para cada issue, ela consulta novamente os
+Issue Fields imediatamente antes da escrita, preservando qualquer valor que
+tenha sido preenchido desde o dry-run. O resultado e gravado em
+`artifacts/issue-classification-result.json` antes da primeira mutacao e apos
+cada issue, permitindo retomar uma aplicacao interrompida sem repetir issues
+ja concluidas. O resultado inclui um digest SHA-256 canonico do plano; apenas
+um resultado com o digest exato pode ser retomado.
+
+Quando o output padrao pertence a outro plano, uma nova aplicacao so pode
+comecar se o resultado anterior for inteiramente terminal e coerente: todos os
+itens devem estar `applied` ou `preserved`, com historico e resumo validos. O
+resultado anterior e arquivado ao lado do output como
+`issue-classification-result.<digest-anterior>.json`. Estado pendente, falho,
+malformado, duplicado ou contraditorio continua bloqueando a execucao antes de
+qualquer chamada ao GitHub.
+
+```bash
+node scripts/apply-issue-classification.mjs \
+  --plan artifacts/issue-classification-plan.json \
+  --apply
+```
+
+As requisicoes sao aplicadas em lotes de 20 issues, com pausa de dois segundos
+entre lotes e 250 ms entre issues. Falhas transitivas recebem no maximo cinco
+tentativas, com atrasos de 1, 2, 4 e 8 segundos. Uma falha interrompe a
+aplicacao e permanece registrada no artefato de resultado.
+
+Depois da aplicacao, gere um novo inventario e audite os valores com:
+
+```bash
+node scripts/validate-open-issue-classification.mjs \
+  --plan artifacts/issue-classification-plan.json \
+  --result artifacts/issue-classification-result.json \
+  --output artifacts/issue-classification-audit.json
+```
+
+A auditoria falha quando a quantidade de issues abertas mudou, algum dos
+quatro campos esta ausente, um valor anterior foi alterado ou um valor nao
+pertence as opcoes oficiais do Issue Field. Ela tambem protege valores
+registrados em `changed_since_plan` e valida novas issues abertas, mesmo que
+nao existissem no plano original. Antes de ser considerada bem-sucedida, a
+auditoria exige o mesmo digest do plano e exatamente um resultado terminal
+(`applied` ou `preserved`) para cada issue planejada; resultados pendentes,
+falhos, duplicados ou ausentes bloqueiam a auditoria.
+
+## Project consolidado
+
+O ProjectV2 privado `Siltech Delivery` consolida todas as issues do inventario
+aberto. A criacao procura primeiro pelo titulo, reutiliza o Project encontrado,
+associa somente os quatro Issue Fields organizacionais ausentes (`Priority`,
+`Workflow`, `Effort` e `Wave`) e inclui somente content IDs ainda ausentes. A
+execucao exige `--apply`, confirma que o Project permanece privado e registra
+numero e URL no console.
+
+Cada associacao de Issue Field e gravada atomicamente no manifest duravel e
+versionado `config/delivery-project-manifest.json`, com IDs do Issue Field e do
+campo do Project, nome e tipo. Esse arquivo ja vincula o Project #11 e e o
+padrao dos scripts de criacao e validacao, portanto uma nova clonagem preserva
+a identidade necessaria para sincronizar com seguranca. O manifest nao contem
+tokens. Um Project existente sem esse manifest confiavel falha fechado; nao e
+permitido inferir associacoes somente pelo nome do campo.
+Antes de criar Project, o manifest registra estado `pending_create`, organizacao,
+titulo, nonce e timestamp. Em erro transitivo, o processo consulta o Project por
+owner/titulo em janela limitada antes de tentar outra criacao e vincula o ID
+recuperado atomicamente.
+Em retomada `pending_create`, essa janela acontece antes de qualquer nova
+mutacao de criacao. Estado `bound` e imutavel: ID divergente ou ausente exige
+reset manual do manifest. Execucoes sem `--apply` nao gravam nem vinculam
+manifest.
+
+Antes de associar um campo ou adicionar um item, o sincronizador grava
+`pendingOperation` no manifest. Se a resposta da mutacao for perdida, ele rele
+o Project em janela limitada e finaliza pelo estado observado antes de
+considerar qualquer retry. Uma retomada reconcilia a mesma intencao antes da
+validacao e nunca repete uma mutacao ja confirmada por leitura.
+
+```bash
+node scripts/create-delivery-project.mjs \
+  --inventory artifacts/open-issues.json \
+  --apply
+```
+
+As inclusoes usam lotes de 20 issues, pausa de dois segundos entre lotes e
+250 ms entre issues. Falhas transitivas recebem no maximo cinco tentativas.
+
+Valide o Project sem alterar dados com:
+
+```bash
+node scripts/validate-delivery-project.mjs \
+  --inventory artifacts/open-issues.json
+```
+
+O validador grava `artifacts/delivery-project-audit.json` e falha se titulo,
+owner, visibilidade, campos oficiais, nomes duplicados de campos ou content
+IDs do inventario divergirem. A consulta inclui items arquivados e exige cada
+content ID do inventario exatamente uma vez.
+
+As views operacionais, movimentacao de Workflow, rotina de classificacao e
+sincronizacao, inclusao de novas issues e rotacao do token estao no
+[runbook do Siltech Delivery](docs/siltech-delivery-project.md).
+
 ## Formularios
 
 Os formularios em `.github/ISSUE_TEMPLATE` funcionam como padrao para

@@ -6,6 +6,17 @@ configure_script="${root_dir}/scripts/configure-issue-fields.sh"
 migration_script="${root_dir}/scripts/migrate-health-audit-issues.sh"
 validation_script="${root_dir}/scripts/validate-health-audit-issues.sh"
 labels_workflow="${root_dir}/.github/workflows/sync-labels.yml"
+classifier_runtime="${root_dir}/scripts/lib/classification.mjs"
+classifier_rules="${root_dir}/config/issue-classification-rules.json"
+classifier_overrides="${root_dir}/config/issue-classification-overrides.json"
+classifier_test="${root_dir}/tests/classification.test.mjs"
+
+grep -qxF '.worktrees/' "${root_dir}/.gitignore"
+
+test -f "${classifier_runtime}"
+test -f "${classifier_rules}"
+test -f "${classifier_overrides}"
+test -f "${classifier_test}"
 
 grep -q 'name: "Workflow"' "${configure_script}"
 grep -q 'field_by_name "Workflow"' "${configure_script}"
