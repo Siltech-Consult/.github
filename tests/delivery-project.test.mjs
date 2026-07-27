@@ -109,6 +109,9 @@ test("validador exige projeto privado, campos oficiais unicos e inventario compl
       Wave: "IF_WAVE"
     },
     manifest: {
+      schemaVersion: 2,
+      state: "bound",
+      pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "run-0", timestamp: "2026-07-27T00:00:00.000Z"},
       project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult"},
       issueFields: {
         Priority: {issueFieldId: "IF_PRIORITY", projectFieldId: "PF_PRIORITY", name: "Priority", dataType: "SINGLE_SELECT"},
@@ -139,6 +142,19 @@ test("validador falha fechado para Project existente sem manifest confiavel", ()
   assert.deepEqual(audit.failures.map((failure) => failure.type), ["missing_project_manifest"]);
 });
 
+test("validador recusa schema de manifest desconhecido antes de confiar em mappings", () => {
+  const audit = validateDeliveryProject({
+    project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult", public: false, projectFields: []},
+    requiredIssueFields: {Priority: "IF_PRIORITY", Workflow: "IF_WORKFLOW", Effort: "IF_EFFORT", Wave: "IF_WAVE"},
+    manifest: {schemaVersion: 1, project: {id: "PVT_1"}, issueFields: {}},
+    issues: []
+  });
+
+  assert.equal(audit.ok, false);
+  assert.equal(audit.failures[0].type, "invalid_project_manifest");
+  assert.match(audit.failures[0].reason, /schemaVersion/);
+});
+
 test("sincronizacao recusa Project existente sem manifest antes de mutar", async () => {
   await assert.rejects(synchronizeDeliveryProject({
     organization: "Siltech-Consult",
@@ -154,6 +170,19 @@ test("sincronizacao recusa Project existente sem manifest antes de mutar", async
       }
     }}})
   }), /Project existente sem manifest confiavel/);
+});
+
+test("sincronizacao recusa manifest malformado antes de consultar Project", async () => {
+  let calls = 0;
+  await assert.rejects(synchronizeDeliveryProject({
+    organization: "Siltech-Consult",
+    issues: [],
+    requiredIssueFields: {Priority: "IF_PRIORITY", Workflow: "IF_WORKFLOW", Effort: "IF_EFFORT", Wave: "IF_WAVE"},
+    apply: true,
+    manifest: {schemaVersion: 1},
+    runGh: async () => { calls += 1; return {}; }
+  }), /Manifest invalido: schemaVersion/);
+  assert.equal(calls, 0);
 });
 
 test("reconcilia create transitivo por owner e titulo antes de repetir mutacao", async () => {
@@ -177,11 +206,44 @@ test("reconcilia create transitivo por owner e titulo antes de repetir mutacao",
     }}};
   };
 
-  const result = await createOrReuseDeliveryProject({organization: "Siltech-Consult", runGh, apply: true, retrySleep: async () => {}});
+  const result = await createOrReuseDeliveryProject({organization: "Siltech-Consult", runGh, apply: true, retrySleep: async () => {}, writeManifest: async () => {}});
 
   assert.equal(result.project.id, "PVT_1");
   assert.equal(result.created, false);
   assert.equal(creates, 1);
+});
+
+test("persiste create pendente antes da mutacao e vincula Project recuperado", async () => {
+  const states = [];
+  let finds = 0;
+  const runGh = async (args) => {
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    if (query.includes("createProjectV2")) {
+      const error = new Error("service unavailable");
+      error.status = 503;
+      throw error;
+    }
+    finds += 1;
+    return {data: {organization: {id: "ORG_1", projectsV2: {
+      nodes: finds === 1 ? [] : [{id: "PVT_1", number: 7, title: "Siltech Delivery", url: "https://example.test/project/7", public: false, owner: {login: "Siltech-Consult"}}],
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }}}};
+  };
+
+  const result = await createOrReuseDeliveryProject({
+    organization: "Siltech-Consult",
+    runGh,
+    apply: true,
+    runNonce: "run-1",
+    now: () => "2026-07-27T00:00:00.000Z",
+    retrySleep: async () => {},
+    writeManifest: async (_path, state) => states.push(structuredClone(state))
+  });
+
+  assert.equal(result.project.id, "PVT_1");
+  assert.deepEqual(states.map((state) => state.state), ["pending_create", "bound"]);
+  assert.equal(states[0].pendingCreate.runNonce, "run-1");
+  assert.equal(states[1].project.id, "PVT_1");
 });
 
 test("le items arquivados e preserva content IDs duplicados para auditoria", async () => {
@@ -224,6 +286,19 @@ test("recusa cursor de items que nao avanca", async () => {
       }}};
     }
   }), /Cursor de items nao avancou/);
+});
+
+test("recusa ciclo de cursor A-B-A", async () => {
+  let index = 0;
+  const cursors = ["A", "B", "A"];
+  await assert.rejects(fetchProject({
+    projectId: "PVT_1",
+    runGh: async () => ({data: {node: {
+      id: "PVT_1",
+      fields: {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}},
+      items: {nodes: [], pageInfo: {hasNextPage: true, endCursor: cursors[index++]}}
+    }}})
+  }), /Ciclo de cursor de items/);
 });
 
 test("aplica apenas operacoes ausentes com retry por item", async () => {
@@ -291,4 +366,33 @@ test("recusa resposta de mutacao sem ID do campo ou item", async () => {
     }),
     apply: true
   }), /content ID inesperado/);
+});
+
+test("aceita cada membro suportado de ProjectV2FieldConfiguration", async () => {
+  for (const type of ["ProjectV2Field", "ProjectV2SingleSelectField", "ProjectV2IterationField"]) {
+    let query = "";
+    await applyProjectOperations({
+      projectId: "PVT_1",
+      operations: {addIssueFields: ["IF_WORKFLOW"], addItems: []},
+      fieldNamesById: {IF_WORKFLOW: "Workflow"},
+      manifest: {issueFields: {}},
+      apply: true,
+      runGh: async (args) => {
+        query = args.find((arg) => arg.startsWith("query=")) ?? "";
+        return {data: {createProjectV2IssueField: {projectV2Field: {__typename: type, id: `PF_${type}`, name: "Workflow", dataType: "SINGLE_SELECT"}}}};
+      }
+    });
+    assert.match(query, new RegExp(`\.\.\. on ${type} \\{ id name dataType \\}`));
+  }
+});
+
+test("recusa batchSize que nao seja inteiro positivo", async () => {
+  await assert.rejects(applyProjectOperations({
+    projectId: "PVT_1",
+    operations: {addIssueFields: [], addItems: []},
+    manifest: {issueFields: {}},
+    runGh: async () => ({}),
+    apply: true,
+    batchSize: 0
+  }), /batchSize deve ser inteiro positivo/);
 });

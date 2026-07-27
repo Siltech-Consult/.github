@@ -175,6 +175,10 @@ Cada associacao de Issue Field e gravada atomicamente em
 `artifacts/delivery-project-manifest.json`, com IDs do Issue Field e do campo
 do Project, nome e tipo. Um Project existente sem esse manifest confiavel falha
 fechado; nao e permitido inferir associacoes somente pelo nome do campo.
+Antes de criar Project, o manifest registra estado `pending_create`, organizacao,
+titulo, nonce e timestamp. Em erro transitivo, o processo consulta o Project por
+owner/titulo em janela limitada antes de tentar outra criacao e vincula o ID
+recuperado atomicamente.
 
 ```bash
 node scripts/create-delivery-project.mjs \

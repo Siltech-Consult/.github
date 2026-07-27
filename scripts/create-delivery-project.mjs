@@ -10,6 +10,7 @@ import {CLASSIFICATION_FIELDS, fetchOrganizationFields} from "./apply-issue-clas
 
 export const DELIVERY_PROJECT_TITLE = "Siltech Delivery";
 export const DEFAULT_MANIFEST_PATH = "artifacts/delivery-project-manifest.json";
+export const MANIFEST_SCHEMA_VERSION = 2;
 const CREATE_DELAYS = [1000, 2000, 4000, 8000];
 
 const FIND_PROJECT_QUERY = `query($login: String!, $title: String!, $after: String) {
@@ -38,7 +39,11 @@ const CREATE_PROJECT_MUTATION = `mutation($ownerId: ID!, $title: String!) {
 }`;
 const ADD_ISSUE_FIELD_MUTATION = `mutation($projectId: ID!, $issueFieldId: ID!) {
   createProjectV2IssueField(input: {projectId: $projectId, issueFieldId: $issueFieldId}) {
-    projectV2Field { ... on ProjectV2Field { id name dataType } }
+    projectV2Field {
+      ... on ProjectV2Field { id name dataType }
+      ... on ProjectV2SingleSelectField { id name dataType }
+      ... on ProjectV2IterationField { id name dataType }
+    }
   }
 }`;
 const ADD_ITEM_MUTATION = `mutation($projectId: ID!, $contentId: ID!) {
@@ -115,6 +120,7 @@ export async function findDeliveryProject({organization, runGh}) {
   let after = null;
   let ownerId;
   const matches = [];
+  const seenCursors = new Set();
   do {
     const response = await withRetry(() => runGh(graphqlArgs(FIND_PROJECT_QUERY, {login: organization, title: DELIVERY_PROJECT_TITLE, after})));
     const owner = data(response).organization;
@@ -122,7 +128,10 @@ export async function findDeliveryProject({organization, runGh}) {
     ownerId ??= owner.id;
     matches.push(...pageNodes(owner.projectsV2).filter((project) => project.title === DELIVERY_PROJECT_TITLE));
     const page = owner.projectsV2?.pageInfo ?? {hasNextPage: false};
-    if (page.hasNextPage && (!page.endCursor || page.endCursor === after)) throw new Error("Cursor de Projects nao avancou");
+    if (page.hasNextPage && !page.endCursor) throw new Error("Cursor de Projects ausente");
+    if (page.hasNextPage && page.endCursor === after) throw new Error("Cursor de Projects nao avancou");
+    if (page.hasNextPage && seenCursors.has(page.endCursor)) throw new Error("Ciclo de cursor de Projects");
+    if (page.hasNextPage) seenCursors.add(page.endCursor);
     after = page.hasNextPage ? page.endCursor : null;
   } while (after);
   if (matches.length > 1) throw new Error(`Mais de um Project encontrado com titulo ${DELIVERY_PROJECT_TITLE}`);
@@ -135,6 +144,8 @@ export async function fetchProject({projectId, runGh}) {
   let state;
   let previousItemsAfter;
   let previousFieldsAfter;
+  const seenItemCursors = new Set();
+  const seenFieldCursors = new Set();
   do {
     const requestedItemsAfter = itemsAfter;
     const requestedFieldsAfter = fieldsAfter;
@@ -148,20 +159,67 @@ export async function fetchProject({projectId, runGh}) {
     previousItemsAfter = requestedItemsAfter;
     const nextItems = project.items?.pageInfo ?? {hasNextPage: false};
     const nextFields = project.fields?.pageInfo ?? {hasNextPage: false};
-    if (nextItems.hasNextPage && (!nextItems.endCursor || nextItems.endCursor === requestedItemsAfter)) throw new Error("Cursor de items nao avancou");
-    if (nextFields.hasNextPage && (!nextFields.endCursor || nextFields.endCursor === requestedFieldsAfter)) throw new Error("Cursor de campos nao avancou");
+    if (nextItems.hasNextPage && !nextItems.endCursor) throw new Error("Cursor de items ausente");
+    if (nextFields.hasNextPage && !nextFields.endCursor) throw new Error("Cursor de campos ausente");
+    if (nextItems.hasNextPage && nextItems.endCursor === requestedItemsAfter) throw new Error("Cursor de items nao avancou");
+    if (nextFields.hasNextPage && nextFields.endCursor === requestedFieldsAfter) throw new Error("Cursor de campos nao avancou");
+    if (nextItems.hasNextPage && seenItemCursors.has(nextItems.endCursor)) throw new Error("Ciclo de cursor de items");
+    if (nextFields.hasNextPage && seenFieldCursors.has(nextFields.endCursor)) throw new Error("Ciclo de cursor de campos");
+    if (nextItems.hasNextPage) seenItemCursors.add(nextItems.endCursor);
+    if (nextFields.hasNextPage) seenFieldCursors.add(nextFields.endCursor);
     itemsAfter = nextItems.hasNextPage ? nextItems.endCursor : null;
     fieldsAfter = nextFields.hasNextPage ? nextFields.endCursor : null;
   } while (itemsAfter || fieldsAfter);
   return normalizeProject(state);
 }
 
-function projectManifest(project) {
-  return {schemaVersion: 1, project: {id: project.id, number: project.number, title: DELIVERY_PROJECT_TITLE, owner: project.owner ?? null, url: project.url ?? null}, issueFields: {}};
+function pendingCreateManifest({organization, runNonce, now}) {
+  return {
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    state: "pending_create",
+    pendingCreate: {organization, title: DELIVERY_PROJECT_TITLE, runNonce, timestamp: now()},
+    project: null,
+    issueFields: {}
+  };
+}
+
+function bindManifest(manifest, project, organization) {
+  manifest.state = "bound";
+  manifest.project = {id: project.id, number: project.number ?? null, title: DELIVERY_PROJECT_TITLE, owner: organization, url: project.url ?? null};
+  manifest.issueFields ??= {};
+  return manifest;
+}
+
+function manifestStructureFailure(manifest, organization) {
+  if (!manifest) return {type: "missing_project_manifest"};
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return {type: "invalid_project_manifest", reason: "manifest deve ser objeto"};
+  if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION) return {type: "invalid_project_manifest", reason: `schemaVersion deve ser ${MANIFEST_SCHEMA_VERSION}`};
+  if (!["pending_create", "bound"].includes(manifest.state)) return {type: "invalid_project_manifest", reason: "state invalido"};
+  const pending = manifest.pendingCreate;
+  if (!pending || typeof pending !== "object" || pending.organization !== organization || pending.title !== DELIVERY_PROJECT_TITLE ||
+    typeof pending.runNonce !== "string" || pending.runNonce === "" || typeof pending.timestamp !== "string" || pending.timestamp === "") {
+    return {type: "invalid_project_manifest", reason: "pendingCreate invalido"};
+  }
+  if (!manifest.issueFields || typeof manifest.issueFields !== "object" || Array.isArray(manifest.issueFields)) return {type: "invalid_project_manifest", reason: "issueFields invalido"};
+  for (const [name, mapping] of Object.entries(manifest.issueFields)) {
+    if (!CLASSIFICATION_FIELDS.includes(name) || !mapping || typeof mapping !== "object" || mapping.name !== name ||
+      !["issueFieldId", "projectFieldId", "name", "dataType"].every((key) => typeof mapping[key] === "string" && mapping[key] !== "")) {
+      return {type: "invalid_project_manifest", reason: `mapping invalido para ${name}`};
+    }
+  }
+  if (manifest.state === "pending_create") {
+    if (manifest.project !== null) return {type: "invalid_project_manifest", reason: "Project pendente nao pode ter ID"};
+  } else if (!manifest.project || typeof manifest.project !== "object" || typeof manifest.project.id !== "string" || manifest.project.id === "" ||
+    manifest.project.title !== DELIVERY_PROJECT_TITLE || manifest.project.owner !== pending.organization) {
+    return {type: "invalid_project_manifest", reason: "Project vinculado invalido"};
+  }
+  return null;
 }
 
 function manifestFailure(manifest, project, organization) {
-  if (!manifest) return {type: "missing_project_manifest"};
+  const structure = manifestStructureFailure(manifest, organization);
+  if (structure) return structure;
+  if (manifest.state !== "bound") return {type: "untrusted_project_manifest"};
   if (manifest.project?.id !== project.id || manifest.project?.title !== DELIVERY_PROJECT_TITLE || manifest.project?.owner !== organization) {
     return {type: "untrusted_project_manifest"};
   }
@@ -205,22 +263,44 @@ export function validateDeliveryProject({organization = "Siltech-Consult", proje
   return {generated_at: now(), summary: {issues: issues.length, project_items: project?.rawItemCount ?? 0, failures: failures.length}, ok: failures.length === 0, failures};
 }
 
-export async function createOrReuseDeliveryProject({organization, runGh, apply = false, retrySleep = sleep} = {}) {
+export async function createOrReuseDeliveryProject({organization, runGh, apply = false, manifest: suppliedManifest, manifestPath = DEFAULT_MANIFEST_PATH, writeManifest, runNonce = randomNonce(), now = () => new Date().toISOString(), retrySleep = sleep} = {}) {
+  if (suppliedManifest) {
+    const invalid = manifestStructureFailure(suppliedManifest, organization);
+    if (invalid) throw new Error(`Manifest invalido: ${invalid.reason ?? invalid.type}`);
+  }
   let existing = await findDeliveryProject({organization, runGh});
-  if (existing.project) return {created: false, project: existing.project};
+  let manifest = suppliedManifest;
+  if (existing.project) {
+    if (manifest?.state === "pending_create") {
+      bindManifest(manifest, existing.project, organization);
+      await persistManifest(writeManifest, manifestPath, manifest);
+    }
+    return {created: false, project: existing.project, manifest};
+  }
   if (!apply) throw new Error("Recusando criar Project sem --apply");
-  for (let attempt = 0; attempt <= CREATE_DELAYS.length; attempt += 1) {
+  manifest ??= pendingCreateManifest({organization, runNonce, now});
+  await persistManifest(writeManifest, manifestPath, manifest);
+  for (let createAttempt = 0; createAttempt < 2; createAttempt += 1) {
     try {
       const response = await runGh(graphqlArgs(CREATE_PROJECT_MUTATION, {ownerId: existing.ownerId, title: DELIVERY_PROJECT_TITLE}));
       const project = data(response).createProjectV2?.projectV2;
       if (!project?.id) throw new Error("ID do Project criado ausente");
-      return {created: true, project: normalizeProject(project)};
+      const selected = normalizeProject(project);
+      bindManifest(manifest, selected, organization);
+      await persistManifest(writeManifest, manifestPath, manifest);
+      return {created: true, project: selected, manifest};
     } catch (error) {
       if (!isTransientGitHubError(error)) throw error;
-      existing = await findDeliveryProject({organization, runGh});
-      if (existing.project) return {created: false, project: existing.project};
-      if (attempt === CREATE_DELAYS.length) throw error;
-      await retrySleep(CREATE_DELAYS[attempt]);
+      for (let readAttempt = 0; readAttempt <= CREATE_DELAYS.length; readAttempt += 1) {
+        existing = await findDeliveryProject({organization, runGh});
+        if (existing.project) {
+          bindManifest(manifest, existing.project, organization);
+          await persistManifest(writeManifest, manifestPath, manifest);
+          return {created: false, project: existing.project, manifest};
+        }
+        if (readAttempt < CREATE_DELAYS.length) await retrySleep(CREATE_DELAYS[readAttempt]);
+      }
+      if (createAttempt === 1) throw error;
     }
   }
   throw new Error("Create Project esgotado");
@@ -229,6 +309,7 @@ export async function createOrReuseDeliveryProject({organization, runGh, apply =
 export async function applyProjectOperations({projectId, operations, fieldNamesById = {}, manifest, runGh, apply = false, batchSize = 20, itemPauseMs = 250, batchPauseMs = 2000, sleep: pause = sleep, retrySleep = sleep, checkpoint = async () => {}} = {}) {
   if (!apply) throw new Error("Recusando escrita sem --apply");
   if (!projectId || typeof runGh !== "function" || !manifest) throw new Error("Project, runGh e manifest sao obrigatorios");
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new Error("batchSize deve ser inteiro positivo");
   const fields = operations?.addIssueFields ?? [];
   const items = operations?.addItems ?? [];
   for (const entry of fields) {
@@ -253,14 +334,19 @@ export async function applyProjectOperations({projectId, operations, fieldNamesB
 
 async function readJson(path, description = "inventario") { try { return JSON.parse(await readFile(path, "utf8")); } catch (error) { throw new Error(`Falha ao ler ${description} em ${path}: ${error.message}`); } }
 async function readOptionalJson(path) { try { return await readJson(path, "manifest"); } catch (error) { if (error.cause?.code === "ENOENT" || /ENOENT/.test(error.message)) return null; throw error; } }
+function randomNonce() { return Math.random().toString(36).slice(2); }
+async function persistManifest(writeManifest, path, manifest) {
+  if (typeof writeManifest !== "function") throw new Error("writeManifest e obrigatorio para criar Project");
+  await writeManifest(path, manifest);
+}
 
 export async function synchronizeDeliveryProject({organization = "Siltech-Consult", issues, requiredIssueFields, runGh, apply = false, manifestPath = DEFAULT_MANIFEST_PATH, manifest: suppliedManifest, readManifest = readOptionalJson, writeManifest = writeJsonAtomically, ...options} = {}) {
   requireIssueIds(issues);
-  const selected = await createOrReuseDeliveryProject({organization, runGh, apply, retrySleep: options.retrySleep});
   let manifest = suppliedManifest ?? await readManifest(manifestPath);
+  const selected = await createOrReuseDeliveryProject({organization, runGh, apply, manifest, manifestPath, writeManifest, retrySleep: options.retrySleep});
+  manifest = selected.manifest ?? manifest;
   if (!manifest && !selected.created) throw new Error(`Project existente sem manifest confiavel: ${manifestPath}`);
   const project = await fetchProject({projectId: selected.project.id, runGh});
-  if (!manifest) { manifest = projectManifest(project); manifest.project.owner = organization; await writeManifest(manifestPath, manifest); }
   const baseline = validateDeliveryProject({organization, project, requiredIssueFields, issues: [], manifest, complete: false});
   if (!baseline.ok) throw new Error(`Project sem estado confiavel: ${baseline.failures.map((failure) => failure.type).join(", ")}`);
   const operations = buildProjectOperations({project, requiredIssueFields, issues, manifest});
