@@ -287,6 +287,32 @@ export function validateDeliveryProject({organization = "Siltech-Consult", proje
   return {generated_at: now(), summary: {issues: issues.length, project_items: project?.rawItemCount ?? 0, failures: failures.length}, ok: failures.length === 0, failures};
 }
 
+function isRetryablePostconditionVisibility({audit, project, operations, manifest}) {
+  if (audit.ok || audit.failures.length === 0) return false;
+  const writtenItems = new Set(operations.addItems ?? []);
+  const writtenFields = new Set((operations.addIssueFields ?? []).map((entry) => typeof entry === "string" ? entry : entry.id));
+  return audit.failures.every((failure) => {
+    if (failure.type === "missing_project_item") return writtenItems.has(failure.contentId);
+    if (!["project_field_manifest_mismatch", "project_field_untrusted"].includes(failure.type)) return false;
+    const mapping = manifest.issueFields?.[failure.field];
+    if (!mapping || !writtenFields.has(mapping.issueFieldId)) return false;
+    return !(project.projectFields ?? []).some((field) =>
+      field?.id === mapping.projectFieldId || field?.name === failure.field);
+  });
+}
+
+async function reconcileProjectPostconditions({organization, projectId, requiredIssueFields, issues, manifest, operations, runGh, retrySleep}) {
+  let project;
+  let audit;
+  for (let readAttempt = 0; readAttempt <= CREATE_DELAYS.length; readAttempt += 1) {
+    project = await fetchProject({projectId, runGh});
+    audit = validateDeliveryProject({organization, project, requiredIssueFields, issues, manifest});
+    if (audit.ok || !isRetryablePostconditionVisibility({audit, project, operations, manifest})) break;
+    if (readAttempt < CREATE_DELAYS.length) await retrySleep(CREATE_DELAYS[readAttempt]);
+  }
+  return {project, audit};
+}
+
 export async function createOrReuseDeliveryProject({organization, runGh, apply = false, manifest: suppliedManifest, manifestPath = DEFAULT_MANIFEST_PATH, writeManifest, runNonce = randomNonce(), now = () => new Date().toISOString(), retrySleep = sleep} = {}) {
   if (suppliedManifest) {
     const invalid = manifestStructureFailure(suppliedManifest, organization);
@@ -401,8 +427,16 @@ export async function synchronizeDeliveryProject({organization = "Siltech-Consul
   if (!baseline.ok) throw new Error(`Project sem estado confiavel: ${baseline.failures.map((failure) => failure.type).join(", ")}`);
   const operations = buildProjectOperations({project, requiredIssueFields, issues, manifest});
   await applyProjectOperations({projectId: project.id, operations, fieldNamesById: Object.fromEntries(CLASSIFICATION_FIELDS.map((name) => [requiredIssueFields[name], name])), manifest, runGh, apply, checkpoint: (state) => writeManifest(manifestPath, state), ...options});
-  const updatedProject = await fetchProject({projectId: project.id, runGh});
-  const audit = validateDeliveryProject({organization, project: updatedProject, requiredIssueFields, issues, manifest});
+  const {project: updatedProject, audit} = await reconcileProjectPostconditions({
+    organization,
+    projectId: project.id,
+    requiredIssueFields,
+    issues,
+    manifest,
+    operations,
+    runGh,
+    retrySleep: options.retrySleep ?? sleep
+  });
   if (!audit.ok) throw new Error(`Postcondicoes do Project falharam: ${audit.failures.map((failure) => failure.type).join(", ")}`);
   await writeManifest(manifestPath, manifest);
   return {created: selected.created, operations, project: updatedProject, manifest, audit};

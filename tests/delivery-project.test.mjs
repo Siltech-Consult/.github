@@ -43,6 +43,91 @@ function liveDeliveryProject() {
   };
 }
 
+const REQUIRED_ISSUE_FIELDS = {
+  Priority: "IF_PRIORITY",
+  Workflow: "IF_WORKFLOW",
+  Effort: "IF_EFFORT",
+  Wave: "IF_WAVE"
+};
+
+const PROJECT_FIELDS = Object.entries(REQUIRED_ISSUE_FIELDS).map(([name]) => ({
+  id: `PF_${name.toUpperCase()}`,
+  name,
+  dataType: "SINGLE_SELECT",
+  __typename: "ProjectV2SingleSelectField"
+}));
+
+function synchronizedManifest() {
+  const manifest = boundManifest();
+  manifest.issueFields = Object.fromEntries(PROJECT_FIELDS.map((field) => [
+    field.name,
+    {
+      issueFieldId: REQUIRED_ISSUE_FIELDS[field.name],
+      projectFieldId: field.id,
+      name: field.name,
+      dataType: field.dataType
+    }
+  ]));
+  return manifest;
+}
+
+function projectQueryResponse({contentIds = [], fields = PROJECT_FIELDS, public: isPublic = false} = {}) {
+  return {data: {node: {
+    id: "PVT_1",
+    number: 7,
+    title: "Siltech Delivery",
+    url: "https://github.com/orgs/Siltech-Consult/projects/7",
+    public: isPublic,
+    owner: {login: "Siltech-Consult"},
+    fields: {nodes: fields, pageInfo: {hasNextPage: false, endCursor: null}},
+    items: {
+      nodes: contentIds.map((contentId, index) => ({id: `PVTI_${index + 1}`, content: {id: contentId}})),
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }
+  }}};
+}
+
+function existingProjectResponse() {
+  return {data: {organization: {
+    id: "ORG_1",
+    projectsV2: {
+      nodes: [{...liveDeliveryProject(), owner: {login: "Siltech-Consult"}}],
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }
+  }}};
+}
+
+function createPostconditionRunGh({baselineFields = PROJECT_FIELDS, finalContentIds = [], finalFields, finalPublic = false} = {}) {
+  const calls = [];
+  let projectReads = 0;
+  const runGh = async (args) => {
+    calls.push(args);
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    if (query.includes("projectsV2(first: 100")) return existingProjectResponse();
+    if (query.includes("node(id: $projectId)")) {
+      projectReads += 1;
+      if (projectReads === 1) return projectQueryResponse({fields: baselineFields});
+      return projectQueryResponse({
+        contentIds: finalContentIds[projectReads - 2] ?? finalContentIds.at(-1) ?? [],
+        fields: finalFields?.[projectReads - 2] ?? finalFields?.at(-1) ?? baselineFields,
+        public: finalPublic
+      });
+    }
+    if (query.includes("createProjectV2IssueField")) {
+      const issueFieldId = args.find((arg) => arg.startsWith("issueFieldId="))?.slice("issueFieldId=".length);
+      const name = Object.entries(REQUIRED_ISSUE_FIELDS).find(([, id]) => id === issueFieldId)?.[0];
+      const field = PROJECT_FIELDS.find((entry) => entry.name === name);
+      return {data: {createProjectV2IssueField: {projectV2Field: field}}};
+    }
+    if (query.includes("addProjectV2ItemById")) {
+      const contentId = args.find((arg) => arg.startsWith("contentId="))?.slice("contentId=".length);
+      return {data: {addProjectV2ItemById: {item: {id: `PVTI_${contentId}`, content: {id: contentId}}}}};
+    }
+    throw new Error(`Consulta inesperada: ${query}`);
+  };
+  return {calls, runGh, projectReads: () => projectReads};
+}
+
 test("nao duplica campos nem itens existentes", () => {
   const operations = buildProjectOperations({
     project: {
@@ -540,6 +625,108 @@ test("aplica apenas operacoes ausentes com retry por item", async () => {
     dataType: "SINGLE_SELECT"
   });
   assert.equal(checkpoints.length, 1);
+});
+
+test("reconcilia postcondicao stale sem repetir mutacoes", async () => {
+  const issues = [{id: "I_1"}, {id: "I_2"}, {id: "I_3"}];
+  const fake = createPostconditionRunGh({
+    finalContentIds: [[], issues.map((issue) => issue.id)]
+  });
+  const delays = [];
+
+  const result = await synchronizeDeliveryProject({
+    organization: "Siltech-Consult",
+    issues,
+    requiredIssueFields: REQUIRED_ISSUE_FIELDS,
+    apply: true,
+    manifest: synchronizedManifest(),
+    runGh: fake.runGh,
+    writeManifest: async () => {},
+    sleep: async () => {},
+    retrySleep: async (delay) => delays.push(delay)
+  });
+
+  const mutationCalls = fake.calls.filter((args) =>
+    (args.find((arg) => arg.startsWith("query=")) ?? "").includes("addProjectV2ItemById"));
+  assert.equal(result.audit.ok, true);
+  assert.equal(fake.projectReads(), 3);
+  assert.deepEqual(delays, [1000]);
+  assert.deepEqual(mutationCalls.map((args) =>
+    args.find((arg) => arg.startsWith("contentId="))?.slice("contentId=".length)), ["I_1", "I_2", "I_3"]);
+});
+
+test("reconcilia somente ausencia de campos gravados nesta execucao", async () => {
+  const fake = createPostconditionRunGh({
+    baselineFields: [],
+    finalFields: [[], PROJECT_FIELDS]
+  });
+  const delays = [];
+
+  const result = await synchronizeDeliveryProject({
+    organization: "Siltech-Consult",
+    issues: [],
+    requiredIssueFields: REQUIRED_ISSUE_FIELDS,
+    apply: true,
+    manifest: boundManifest(),
+    runGh: fake.runGh,
+    writeManifest: async () => {},
+    retrySleep: async (delay) => delays.push(delay)
+  });
+
+  const mutationCalls = fake.calls.filter((args) =>
+    (args.find((arg) => arg.startsWith("query=")) ?? "").includes("createProjectV2IssueField"));
+  assert.equal(result.audit.ok, true);
+  assert.equal(fake.projectReads(), 3);
+  assert.deepEqual(delays, [1000]);
+  assert.deepEqual(
+    mutationCalls.map((args) =>
+      args.find((arg) => arg.startsWith("issueFieldId="))?.slice("issueFieldId=".length)),
+    Object.values(REQUIRED_ISSUE_FIELDS)
+  );
+});
+
+test("falha apos esgotar reconciliacao de postcondicao stale", async () => {
+  const issues = [{id: "I_1"}, {id: "I_2"}, {id: "I_3"}];
+  const fake = createPostconditionRunGh({finalContentIds: [[]]});
+  const delays = [];
+
+  await assert.rejects(synchronizeDeliveryProject({
+    organization: "Siltech-Consult",
+    issues,
+    requiredIssueFields: REQUIRED_ISSUE_FIELDS,
+    apply: true,
+    manifest: synchronizedManifest(),
+    runGh: fake.runGh,
+    writeManifest: async () => {},
+    sleep: async () => {},
+    retrySleep: async (delay) => delays.push(delay)
+  }), /Postcondicoes do Project falharam: missing_project_item/);
+
+  const mutationCalls = fake.calls.filter((args) =>
+    (args.find((arg) => arg.startsWith("query=")) ?? "").includes("addProjectV2ItemById"));
+  assert.equal(fake.projectReads(), 6);
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000]);
+  assert.equal(mutationCalls.length, 3);
+});
+
+test("falha estrutural na postcondicao nao recebe retry", async () => {
+  const fake = createPostconditionRunGh({finalContentIds: [["I_1"]], finalPublic: true});
+  const delays = [];
+
+  await assert.rejects(synchronizeDeliveryProject({
+    organization: "Siltech-Consult",
+    issues: [{id: "I_1"}],
+    requiredIssueFields: REQUIRED_ISSUE_FIELDS,
+    apply: true,
+    manifest: synchronizedManifest(),
+    runGh: fake.runGh,
+    writeManifest: async () => {},
+    sleep: async () => {},
+    retrySleep: async (delay) => delays.push(delay)
+  }), /Postcondicoes do Project falharam: project_not_private/);
+
+  assert.equal(fake.projectReads(), 2);
+  assert.deepEqual(delays, []);
 });
 
 test("recusa resposta de mutacao sem ID do campo ou item", async () => {
