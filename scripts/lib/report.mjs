@@ -2,13 +2,15 @@ import {mkdir, rename, unlink, writeFile} from "node:fs/promises";
 import {basename, dirname, join} from "node:path";
 import {randomUUID} from "node:crypto";
 
+const CLASSIFICATION_FIELDS = ["Priority", "Workflow", "Effort", "Wave"];
+
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
 }
 
 function countFields(result, predicate) {
-  return Object.entries(result.sources ?? {})
-    .filter(([field, source]) => hasValue(result.proposed?.[field]) && predicate(source))
+  return CLASSIFICATION_FIELDS
+    .filter((field) => hasValue(result.proposed?.[field]) && predicate(result.sources?.[field]))
     .length;
 }
 
@@ -18,6 +20,14 @@ function issueUrl(issue) {
 
 function organizationFromIssue(issue) {
   return String(issue?.repository ?? "").split("/")[0] || "Siltech-Consult";
+}
+
+function compareIssues(left, right) {
+  const leftRepository = String(left.repository ?? "");
+  const rightRepository = String(right.repository ?? "");
+  if (leftRepository < rightRepository) return -1;
+  if (leftRepository > rightRepository) return 1;
+  return Number(left.number) - Number(right.number);
 }
 
 export function validateOverrides(overrides = {}) {
@@ -52,14 +62,12 @@ export function buildClassificationPlan(issues, {
     preserved_fields: 0,
     proposed_fields: 0
   };
-  Object.defineProperty(summary, "preserved", {value: 0, writable: true});
-  const items = issues.map((issue) => {
+  const items = [...issues].sort(compareIssues).map((issue) => {
     const result = classify(issue);
     const preservedFields = countFields(result, (source) => source === "existing");
     const proposedFields = countFields(result, (source) => source !== "existing");
     summary.preserved_fields += preservedFields;
     summary.proposed_fields += proposedFields;
-    summary.preserved += preservedFields;
     if (result.ambiguous) summary.ambiguous += 1;
     else summary.complete += 1;
 
