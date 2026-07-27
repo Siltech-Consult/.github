@@ -1,4 +1,4 @@
-import {execFile} from "node:child_process";
+import {execFile, spawn} from "node:child_process";
 import {promisify} from "node:util";
 import {mkdir, rename, unlink, writeFile} from "node:fs/promises";
 import {dirname, basename, join} from "node:path";
@@ -88,12 +88,33 @@ const PULL_REQUEST_PAGE_QUERY = `query($id: ID!, $after: String) {
 }`;
 
 export function createRunGh({executable = "gh"} = {}) {
-  return async (args) => {
+  return async (args, {input} = {}) => {
+    if (input !== undefined) return runGhWithInput(executable, args, input);
     const {stdout} = await execFileAsync(executable, args, {
       maxBuffer: 32 * 1024 * 1024
     });
     return JSON.parse(stdout);
   };
+}
+
+function runGhWithInput(executable, args, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {stdio: ["pipe", "pipe", "pipe"]});
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) return reject(new Error(stderr.trim() || `gh api exited with ${code}`));
+      try {
+        resolve(stdout.trim() === "" ? null : JSON.parse(stdout));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(input);
+  });
 }
 
 function searchArgs(org) {

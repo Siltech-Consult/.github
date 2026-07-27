@@ -122,6 +122,37 @@ incluir `reason`; overrides sem justificativa falham antes do dry-run.
 }
 ```
 
+## Aplicacao e auditoria da classificacao
+
+A aplicacao usa apenas o plano completo, sem ambiguidades, e requer a
+confirmacao explicita `--apply`. Para cada issue, ela consulta novamente os
+Issue Fields imediatamente antes da escrita, preservando qualquer valor que
+tenha sido preenchido desde o dry-run. O resultado e gravado em
+`artifacts/issue-classification-result.json`.
+
+```bash
+node scripts/apply-issue-classification.mjs \
+  --plan artifacts/issue-classification-plan.json \
+  --apply
+```
+
+As requisicoes sao aplicadas em lotes de 20 issues, com pausa de dois segundos
+entre lotes e 250 ms entre issues. Falhas transitivas recebem no maximo cinco
+tentativas, com atrasos de 1, 2, 4 e 8 segundos. Uma falha interrompe a
+aplicacao e permanece registrada no artefato de resultado.
+
+Depois da aplicacao, gere um novo inventario e audite os valores com:
+
+```bash
+node scripts/validate-open-issue-classification.mjs \
+  --plan artifacts/issue-classification-plan.json \
+  --output artifacts/issue-classification-audit.json
+```
+
+A auditoria falha quando a quantidade de issues abertas mudou, algum dos
+quatro campos esta ausente, um valor anterior foi alterado ou um valor nao
+pertence as opcoes oficiais do Issue Field.
+
 ## Formularios
 
 Os formularios em `.github/ISSUE_TEMPLATE` funcionam como padrao para
