@@ -259,9 +259,15 @@ function validateResumeResult(plan, resumeResult, planDigest) {
   }
 }
 
+export function validateClassificationArtifacts(plan, resumeResult) {
+  validatePlan(plan);
+  const planDigest = canonicalPlanDigest(plan);
+  if (resumeResult !== undefined) validateResumeResult(plan, resumeResult, planDigest);
+  return planDigest;
+}
+
 function createResult(plan, resumeResult, planDigest, now) {
   const resumable = resumeResult !== undefined;
-  if (resumable) validateResumeResult(plan, resumeResult, planDigest);
   const knownItems = new Map((resumable ? resumeResult.items : []).map((item) => [resultItemKey(item), item]));
   const result = {
     generated_at: resumable ? resumeResult.generated_at : now(),
@@ -313,10 +319,9 @@ export async function applyClassificationPlan({
   now = () => new Date().toISOString()
 } = {}) {
   if (!apply) throw new Error("Recusando escrita sem --apply");
-  validatePlan(plan);
+  const planDigest = validateClassificationArtifacts(plan, resumeResult);
   if (typeof runGh !== "function") throw new Error("runGh e obrigatorio");
 
-  const planDigest = canonicalPlanDigest(plan);
   const result = createResult(plan, resumeResult, planDigest, now);
   await checkpoint(result);
 
@@ -486,9 +491,10 @@ export async function main(argv = process.argv) {
   try {
     const plan = await readJson(planPath, "plano");
     if (!apply) throw new Error("Recusando escrita sem --apply");
+    const resumeResult = await readOptionalJson(outputPath);
+    validateClassificationArtifacts(plan, resumeResult);
     const runGh = createRunGh({executable});
     const fieldIds = await fetchOrganizationFieldIds({org: plan.organization, runGh});
-    const resumeResult = await readOptionalJson(outputPath);
     const result = await applyClassificationPlan({
       plan,
       fieldIds,

@@ -683,6 +683,63 @@ test("CLI recusa sem --apply antes de executar gh", async (t) => {
   await assert.rejects(readFile(markerPath, "utf8"));
 });
 
+test("CLI valida resultado anterior antes de executar gh", async (t) => {
+  const plan = {organization: "Siltech-Consult", summary: {ambiguous: 0}, items: [item]};
+  const invalidResults = [
+    {
+      name: "JSON malformado",
+      contents: "{",
+      error: /Falha ao ler resultado anterior/
+    },
+    {
+      name: "status contraditorio",
+      contents: JSON.stringify({
+        plan_digest: canonicalPlanDigest(plan),
+        items: [resumeRecord("applied", [
+          attemptEntry("prepared", "in_flight"),
+          attemptEntry("outcome", "authoritative_rejection")
+        ])]
+      }),
+      error: /status applied contradiz resultado final/
+    }
+  ];
+
+  for (const invalidResult of invalidResults) {
+    await t.test(invalidResult.name, async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "apply-classification-cli-resume-"));
+      t.after(() => rm(directory, {recursive: true, force: true}));
+      const planPath = join(directory, "plan.json");
+      const outputPath = join(directory, "result.json");
+      const ghPath = join(directory, "gh");
+      const markerPath = join(directory, "gh-called");
+      await Promise.all([
+        writeFile(planPath, JSON.stringify(plan), "utf8"),
+        writeFile(outputPath, invalidResult.contents, "utf8"),
+        writeFile(ghPath, `#!/bin/sh\ntouch "${markerPath}"\nexit 99\n`, "utf8")
+      ]);
+      await chmod(ghPath, 0o755);
+
+      const result = await new Promise((resolveResult, reject) => {
+        const child = spawn(process.execPath, [
+          applyScript,
+          "--plan", planPath,
+          "--output", outputPath,
+          "--gh", ghPath,
+          "--apply"
+        ], {cwd: projectRoot});
+        let stderr = "";
+        child.stderr.on("data", (chunk) => { stderr += chunk; });
+        child.on("error", reject);
+        child.on("close", (code) => resolveResult({code, stderr}));
+      });
+
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, invalidResult.error);
+      await assert.rejects(readFile(markerPath, "utf8"));
+    });
+  }
+});
+
 test("auditoria aponta campos ausentes, mudanca, opcao invalida e inventario divergente", () => {
   const plan = {
       summary: {total: 2},
