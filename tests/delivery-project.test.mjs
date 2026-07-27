@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 import {
   applyProjectOperations,
   buildProjectOperations,
+  createOrReuseDeliveryProject,
   extractProjectIssueFieldIds,
-  findDeliveryProject
+  fetchProject,
+  findDeliveryProject,
+  synchronizeDeliveryProject
 } from "../scripts/create-delivery-project.mjs";
 import { validateDeliveryProject } from "../scripts/validate-delivery-project.mjs";
 
@@ -86,15 +89,16 @@ test("validador exige projeto privado, campos oficiais unicos e inventario compl
   const audit = validateDeliveryProject({
     organization: "Siltech-Consult",
     project: {
+      id: "PVT_1",
       title: "Siltech Delivery",
       owner: "Siltech-Consult",
       public: false,
-      issueFields: [
-        {name: "Priority", issueFieldId: "IF_PRIORITY"},
-        {name: "Workflow", issueFieldId: "IF_WORKFLOW"},
-        {name: "Effort", issueFieldId: "IF_EFFORT"},
-        {name: "Wave", issueFieldId: "IF_WAVE"},
-        {name: "Wave", issueFieldId: "IF_WAVE"}
+      projectFields: [
+        {id: "PF_PRIORITY", name: "Priority", dataType: "SINGLE_SELECT"},
+        {id: "PF_WORKFLOW", name: "Workflow", dataType: "SINGLE_SELECT"},
+        {id: "PF_EFFORT", name: "Effort", dataType: "SINGLE_SELECT"},
+        {id: "PF_WAVE", name: "Wave", dataType: "SINGLE_SELECT"},
+        {id: "PF_WAVE_2", name: "Wave", dataType: "SINGLE_SELECT"}
       ],
       contentIds: ["I_1"]
     },
@@ -104,18 +108,128 @@ test("validador exige projeto privado, campos oficiais unicos e inventario compl
       Effort: "IF_EFFORT",
       Wave: "IF_WAVE"
     },
+    manifest: {
+      project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult"},
+      issueFields: {
+        Priority: {issueFieldId: "IF_PRIORITY", projectFieldId: "PF_PRIORITY", name: "Priority", dataType: "SINGLE_SELECT"},
+        Workflow: {issueFieldId: "IF_WORKFLOW", projectFieldId: "PF_WORKFLOW", name: "Workflow", dataType: "SINGLE_SELECT"},
+        Effort: {issueFieldId: "IF_EFFORT", projectFieldId: "PF_EFFORT", name: "Effort", dataType: "SINGLE_SELECT"},
+        Wave: {issueFieldId: "IF_WAVE", projectFieldId: "PF_WAVE", name: "Wave", dataType: "SINGLE_SELECT"}
+      }
+    },
     issues: [{id: "I_1"}, {id: "I_2"}]
   });
 
   assert.equal(audit.ok, false);
   assert.deepEqual(audit.failures.map((failure) => failure.type), [
     "duplicate_project_field",
+    "project_field_untrusted",
     "missing_project_item"
   ]);
 });
 
+test("validador falha fechado para Project existente sem manifest confiavel", () => {
+  const audit = validateDeliveryProject({
+    project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult", public: false, projectFields: []},
+    requiredIssueFields: {Priority: "IF_PRIORITY", Workflow: "IF_WORKFLOW", Effort: "IF_EFFORT", Wave: "IF_WAVE"},
+    issues: []
+  });
+
+  assert.equal(audit.ok, false);
+  assert.deepEqual(audit.failures.map((failure) => failure.type), ["missing_project_manifest"]);
+});
+
+test("sincronizacao recusa Project existente sem manifest antes de mutar", async () => {
+  await assert.rejects(synchronizeDeliveryProject({
+    organization: "Siltech-Consult",
+    issues: [],
+    requiredIssueFields: {Priority: "IF_PRIORITY", Workflow: "IF_WORKFLOW", Effort: "IF_EFFORT", Wave: "IF_WAVE"},
+    apply: true,
+    readManifest: async () => null,
+    runGh: async () => ({data: {organization: {
+      id: "ORG_1",
+      projectsV2: {
+        nodes: [{id: "PVT_1", number: 7, title: "Siltech Delivery", url: "https://example.test/project/7", public: false, owner: {login: "Siltech-Consult"}}],
+        pageInfo: {hasNextPage: false, endCursor: null}
+      }
+    }}})
+  }), /Project existente sem manifest confiavel/);
+});
+
+test("reconcilia create transitivo por owner e titulo antes de repetir mutacao", async () => {
+  let finds = 0;
+  let creates = 0;
+  const runGh = async (args) => {
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    if (query.includes("createProjectV2")) {
+      creates += 1;
+      const error = new Error("service unavailable");
+      error.status = 503;
+      throw error;
+    }
+    finds += 1;
+    return {data: {organization: {
+      id: "ORG_1",
+      projectsV2: {
+        nodes: finds === 1 ? [] : [{id: "PVT_1", number: 7, title: "Siltech Delivery", url: "https://example.test/project/7", public: false, owner: {login: "Siltech-Consult"}}],
+        pageInfo: {hasNextPage: false, endCursor: null}
+      }
+    }}};
+  };
+
+  const result = await createOrReuseDeliveryProject({organization: "Siltech-Consult", runGh, apply: true, retrySleep: async () => {}});
+
+  assert.equal(result.project.id, "PVT_1");
+  assert.equal(result.created, false);
+  assert.equal(creates, 1);
+});
+
+test("le items arquivados e preserva content IDs duplicados para auditoria", async () => {
+  const project = await fetchProject({
+    projectId: "PVT_1",
+    runGh: async (args) => {
+      const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+      assert.match(query, /archivedStates: \[ARCHIVED, NOT_ARCHIVED\]/);
+      return {data: {node: {
+        id: "PVT_1",
+        number: 7,
+        title: "Siltech Delivery",
+        url: "https://example.test/project/7",
+        public: false,
+        owner: {login: "Siltech-Consult"},
+        fields: {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}},
+        items: {
+          nodes: [{id: "PVTI_1", content: {id: "I_1"}}, {id: "PVTI_2", content: {id: "I_1"}}],
+          pageInfo: {hasNextPage: false, endCursor: null}
+        }
+      }}};
+    }
+  });
+
+  assert.equal(project.rawItemCount, 2);
+  assert.deepEqual(project.contentIds, ["I_1", "I_1"]);
+});
+
+test("recusa cursor de items que nao avanca", async () => {
+  let calls = 0;
+  await assert.rejects(fetchProject({
+    projectId: "PVT_1",
+    runGh: async () => {
+      calls += 1;
+      if (calls > 2) throw new Error("consulta repetida");
+      return {data: {node: {
+        id: "PVT_1",
+        fields: {nodes: [], pageInfo: {hasNextPage: false, endCursor: null}},
+        items: {nodes: [], pageInfo: {hasNextPage: true, endCursor: "CURSOR"}}
+      }}};
+    }
+  }), /Cursor de items nao avancou/);
+});
+
 test("aplica apenas operacoes ausentes com retry por item", async () => {
   const calls = [];
+  const manifest = {issueFields: {}};
+  const checkpoints = [];
   let itemAttempts = 0;
   const runGh = async (args) => {
     calls.push(args);
@@ -126,19 +240,55 @@ test("aplica apenas operacoes ausentes com retry por item", async () => {
       error.status = 503;
       throw error;
     }
-    return {data: {ok: true}};
+    if (query.includes("createProjectV2IssueField")) {
+      return {data: {createProjectV2IssueField: {projectV2Field: {id: "PF_WORKFLOW", name: "Workflow", dataType: "SINGLE_SELECT"}}}};
+    }
+    return {data: {addProjectV2ItemById: {item: {id: "PVTI_2", content: {id: contentId}}}}};
   };
 
   await applyProjectOperations({
     projectId: "PVT_1",
     operations: {addIssueFields: ["IF_WORKFLOW"], addItems: ["I_2"]},
+    manifest,
+    fieldNamesById: {IF_WORKFLOW: "Workflow"},
     runGh,
     apply: true,
     batchSize: 1,
     sleep: async () => {},
-    retrySleep: async () => {}
+    retrySleep: async () => {},
+    checkpoint: async (state) => checkpoints.push(structuredClone(state))
   });
 
   assert.equal(calls.filter((args) => (args.find((arg) => arg.startsWith("query=")) ?? "").includes("createProjectV2IssueField")).length, 1);
   assert.equal(calls.filter((args) => (args.find((arg) => arg.startsWith("query=")) ?? "").includes("addProjectV2ItemById")).length, 2);
+  assert.deepEqual(manifest.issueFields.Workflow, {
+    issueFieldId: "IF_WORKFLOW",
+    projectFieldId: "PF_WORKFLOW",
+    name: "Workflow",
+    dataType: "SINGLE_SELECT"
+  });
+  assert.equal(checkpoints.length, 1);
+});
+
+test("recusa resposta de mutacao sem ID do campo ou item", async () => {
+  await assert.rejects(applyProjectOperations({
+    projectId: "PVT_1",
+    operations: {addIssueFields: ["IF_WORKFLOW"], addItems: []},
+    fieldNamesById: {IF_WORKFLOW: "Workflow"},
+    manifest: {issueFields: {}},
+    runGh: async () => ({
+      data: {createProjectV2IssueField: {projectV2Field: {}}}
+    }),
+    apply: true
+  }), /ID do campo do Project ausente/);
+
+  await assert.rejects(applyProjectOperations({
+    projectId: "PVT_1",
+    operations: {addIssueFields: [], addItems: ["I_1"]},
+    manifest: {issueFields: {}},
+    runGh: async () => ({
+      data: {addProjectV2ItemById: {item: {id: "PVTI_1", content: {id: "I_2"}}}}
+    }),
+    apply: true
+  }), /content ID inesperado/);
 });

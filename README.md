@@ -171,9 +171,15 @@ associa somente os quatro Issue Fields organizacionais ausentes (`Priority`,
 execucao exige `--apply`, confirma que o Project permanece privado e registra
 numero e URL no console.
 
+Cada associacao de Issue Field e gravada atomicamente em
+`artifacts/delivery-project-manifest.json`, com IDs do Issue Field e do campo
+do Project, nome e tipo. Um Project existente sem esse manifest confiavel falha
+fechado; nao e permitido inferir associacoes somente pelo nome do campo.
+
 ```bash
 node scripts/create-delivery-project.mjs \
   --inventory artifacts/open-issues.json \
+  --manifest artifacts/delivery-project-manifest.json \
   --apply
 ```
 
@@ -184,12 +190,14 @@ Valide o Project sem alterar dados com:
 
 ```bash
 node scripts/validate-delivery-project.mjs \
-  --inventory artifacts/open-issues.json
+  --inventory artifacts/open-issues.json \
+  --manifest artifacts/delivery-project-manifest.json
 ```
 
 O validador grava `artifacts/delivery-project-audit.json` e falha se titulo,
 owner, visibilidade, campos oficiais, nomes duplicados de campos ou content
-IDs do inventario divergirem.
+IDs do inventario divergirem. A consulta inclui items arquivados e exige cada
+content ID do inventario exatamente uma vez.
 
 ## Formularios
 
