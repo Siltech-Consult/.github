@@ -7,7 +7,8 @@ import {fileURLToPath} from "node:url";
 import {spawn} from "node:child_process";
 import {
   applyClassificationPlan,
-  buildIssueFieldPayload
+  buildIssueFieldPayload,
+  fetchIssueFields
 } from "../scripts/apply-issue-classification.mjs";
 import {auditOpenIssueClassification} from "../scripts/validate-open-issue-classification.mjs";
 
@@ -33,6 +34,10 @@ const item = {
   }
 };
 
+function issueFieldEndpoint(args) {
+  return args.find((arg) => String(arg).includes("/issue-field-values"));
+}
+
 test("envia somente campos que estavam vazios", () => {
   const payload = buildIssueFieldPayload(item, fieldIds);
 
@@ -52,7 +57,7 @@ test("rele campos antes de escrever e preserva valor preenchido apos plano", asy
     sleep: async () => {},
     runGh: async (args, {input} = {}) => {
       calls.push({args, input});
-      if (args.at(-1).endsWith("/issue-field-values")) {
+      if (issueFieldEndpoint(args)) {
         return [
           {issue_field_name: "Priority", single_select_option: {name: "P1"}},
           {issue_field_name: "Workflow", single_select_option: {name: "Ready"}}
@@ -75,6 +80,68 @@ test("rele campos antes de escrever e preserva valor preenchido apos plano", asy
   });
 });
 
+test("rele e remonta payload em cada retry de mutacao", async () => {
+  const payloads = [];
+  let reads = 0;
+  const result = await applyClassificationPlan({
+    plan: {summary: {ambiguous: 0}, items: [item]},
+    fieldIds,
+    apply: true,
+    sleep: async () => {},
+    retrySleep: async () => {},
+    runGh: async (args, {input} = {}) => {
+      const endpoint = issueFieldEndpoint(args);
+      if (!args.includes("--method") && endpoint) {
+        reads += 1;
+        return reads === 1
+          ? [{issue_field_name: "Priority", single_select_option: {name: "P1"}}]
+          : [
+            {issue_field_name: "Priority", single_select_option: {name: "P1"}},
+            {issue_field_name: "Workflow", single_select_option: {name: "Ready"}}
+          ];
+      }
+      if (args.includes("--method")) {
+        payloads.push(JSON.parse(input));
+        if (payloads.length === 1) {
+          const error = new Error("rate limited");
+          error.status = 429;
+          throw error;
+        }
+      }
+      return {};
+    }
+  });
+
+  assert.equal(reads, 2);
+  assert.deepEqual(payloads.map((payload) => payload.issue_field_values.map((value) => value.field_id)), [
+    [2, 3, 4],
+    [3, 4]
+  ]);
+  assert.deepEqual(result.items[0].attempted_fields, ["Effort", "Wave"]);
+});
+
+test("le todas as paginas de Issue Fields antes de aplicar", async () => {
+  const pages = [];
+  const fields = await fetchIssueFields({
+    repository: "Siltech-Consult/demo",
+    number: 7,
+    runGh: async (args) => {
+      const endpoint = issueFieldEndpoint(args);
+      pages.push(endpoint);
+      if (endpoint.endsWith("page=1")) {
+        return Array.from({length: 100}, (_, index) => ({
+          issue_field_name: `Extra ${index}`,
+          single_select_option: {name: "unused"}
+        }));
+      }
+      return [{issue_field_name: "Priority", single_select_option: {name: "P1"}}];
+    }
+  });
+
+  assert.equal(pages.length, 2);
+  assert.equal(fields.Priority, "P1");
+});
+
 test("recusa escrita quando apply nao foi confirmado", async () => {
   await assert.rejects(
     applyClassificationPlan({
@@ -86,6 +153,77 @@ test("recusa escrita quando apply nao foi confirmado", async () => {
     }),
     /--apply/
   );
+});
+
+test("inicializa e atualiza checkpoint duravel antes de mutacoes e apos falha", async () => {
+  const checkpoints = [];
+  const failedItem = {...item, number: 8, current: {}, proposed: {
+    Priority: "P2", Workflow: "Backlog", Effort: "M", Wave: "Onda 2"
+  }};
+  const result = await applyClassificationPlan({
+    plan: {generated_at: "2026-07-27T00:00:00Z", summary: {ambiguous: 0}, items: [item, failedItem]},
+    fieldIds,
+    apply: true,
+    sleep: async () => {},
+    checkpoint: async (state) => checkpoints.push(JSON.parse(JSON.stringify(state))),
+    runGh: async (args) => {
+      const endpoint = issueFieldEndpoint(args);
+      if (!args.includes("--method") && endpoint) {
+        return endpoint.includes("/8/")
+          ? [{issue_field_name: "Workflow", single_select_option: {name: "Ready"}}]
+          : [];
+      }
+      if (args.includes("--method") && endpoint.includes("/8/")) {
+        const error = new Error("invalid field value");
+        error.status = 422;
+        throw error;
+      }
+      return {};
+    }
+  });
+
+  assert.deepEqual(checkpoints[0].items, []);
+  const preparedFailure = checkpoints.filter((state) => state.items.some((entry) =>
+    entry.number === 8 && entry.status === "pending")).at(-1);
+  assert.deepEqual(preparedFailure.items.find((entry) => entry.number === 8).attempted_fields, [
+    "Priority", "Effort", "Wave"
+  ]);
+  assert.equal(result.items.find((entry) => entry.number === 8).status, "failed");
+  assert.deepEqual(result.items.find((entry) => entry.number === 8).attempted_fields, [
+    "Priority", "Effort", "Wave"
+  ]);
+  assert.deepEqual(result.items.find((entry) => entry.number === 8).changed_since_plan, {
+    Workflow: {planned: null, current: "Ready"}
+  });
+});
+
+test("retoma checkpoint sem repetir issue ja aplicada", async () => {
+  const laterItem = {...item, number: 8, current: {}, proposed: {
+    Priority: "P2", Workflow: "Backlog", Effort: "M", Wave: "Onda 2"
+  }};
+  const calls = [];
+  const result = await applyClassificationPlan({
+    plan: {generated_at: "2026-07-27T00:00:00Z", summary: {ambiguous: 0}, items: [item, laterItem]},
+    fieldIds,
+    apply: true,
+    sleep: async () => {},
+    resumeResult: {
+      plan_generated_at: "2026-07-27T00:00:00Z",
+      items: [
+        {repository: item.repository, number: item.number, status: "applied"},
+        {repository: laterItem.repository, number: laterItem.number, status: "failed"}
+      ]
+    },
+    runGh: async (args) => {
+      calls.push(args);
+      if (!args.includes("--method")) return [];
+      return {};
+    }
+  });
+
+  assert.equal(calls.some((args) => issueFieldEndpoint(args)?.includes("/7/")), false);
+  assert.equal(calls.some((args) => issueFieldEndpoint(args)?.includes("/8/")), true);
+  assert.equal(result.items.find((entry) => entry.number === 8).attempts, 1);
 });
 
 test("CLI recusa sem --apply antes de executar gh", async (t) => {
@@ -135,7 +273,8 @@ test("auditoria aponta campos ausentes, mudanca, opcao invalida e inventario div
       Workflow: ["Backlog"],
       Effort: ["M"],
       Wave: ["Onda 1"]
-    }
+    },
+    result: {items: []}
   });
 
   assert.equal(audit.ok, false);
@@ -146,4 +285,60 @@ test("auditoria aponta campos ausentes, mudanca, opcao invalida e inventario div
     "invalid_option",
     "missing_issue"
   ]);
+});
+
+test("auditoria protege valor preenchido depois do plano", () => {
+  const audit = auditOpenIssueClassification({
+    plan: {items: [{repository: "Siltech-Consult/demo", number: 1, current: {}}]},
+    result: {
+      items: [{
+        repository: "Siltech-Consult/demo",
+        number: 1,
+        changed_since_plan: {Workflow: {planned: null, current: "Ready"}}
+      }]
+    },
+    issues: [{
+      repository: "Siltech-Consult/demo",
+      number: 1,
+      fields: {Priority: "P1", Workflow: "Backlog", Effort: "M", Wave: "Onda 1"}
+    }],
+    officialOptions: {
+      Priority: ["P1"], Workflow: ["Ready", "Backlog"], Effort: ["M"], Wave: ["Onda 1"]
+    }
+  });
+
+  assert.deepEqual(audit.failures, [{
+    type: "changed_since_plan_value_changed",
+    issue: "Siltech-Consult/demo#1",
+    field: "Workflow",
+    expected: "Ready",
+    audited: "Backlog"
+  }]);
+});
+
+test("auditoria verifica campos de issues abertas que nao estavam no plano", () => {
+  const audit = auditOpenIssueClassification({
+    plan: {items: [{repository: "Siltech-Consult/demo", number: 1, current: {}}]},
+    result: {items: []},
+    issues: [
+      {
+        repository: "Siltech-Consult/demo",
+        number: 1,
+        fields: {Priority: "P1", Workflow: "Backlog", Effort: "M", Wave: "Onda 1"}
+      },
+      {
+        repository: "Siltech-Consult/demo",
+        number: 2,
+        fields: {Priority: "P99", Effort: "M", Wave: "Onda 1"}
+      }
+    ],
+    officialOptions: {
+      Priority: ["P1"], Workflow: ["Backlog"], Effort: ["M"], Wave: ["Onda 1"]
+    }
+  });
+
+  assert.equal(audit.failures.some((failure) =>
+    failure.issue === "Siltech-Consult/demo#2" && failure.type === "invalid_option"), true);
+  assert.equal(audit.failures.some((failure) =>
+    failure.issue === "Siltech-Consult/demo#2" && failure.type === "missing_field" && failure.field === "Workflow"), true);
 });

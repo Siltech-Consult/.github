@@ -27,8 +27,12 @@ function apiArgs(endpoint, {method, input} = {}) {
   return args;
 }
 
+function fieldValuesFromResponse(response) {
+  return Array.isArray(response) ? response : response?.issue_field_values ?? [];
+}
+
 function fieldsFromValueResponse(response) {
-  const values = Array.isArray(response) ? response : response?.issue_field_values ?? [];
+  const values = fieldValuesFromResponse(response);
   const fields = {};
   for (const value of values) {
     const name = value?.issue_field_name ?? value?.field?.name;
@@ -80,8 +84,49 @@ export async function fetchOrganizationFieldIds({org, runGh}) {
 }
 
 export async function fetchIssueFields({repository, number, runGh}) {
-  const response = await withRetry(() => runGh(apiArgs(`repos/${repository}/issues/${number}/issue-field-values`)));
-  return fieldsFromValueResponse(response);
+  const fields = {};
+  for (let page = 1; ; page += 1) {
+    const response = await runGh(apiArgs(
+      `repos/${repository}/issues/${number}/issue-field-values?per_page=100&page=${page}`
+    ));
+    const values = fieldValuesFromResponse(response);
+    Object.assign(fields, fieldsFromValueResponse(values));
+    if (values.length < 100) return fields;
+  }
+}
+
+function resultItemKey(item) {
+  return `${item.repository}#${item.number}`;
+}
+
+function updateSummary(result, total) {
+  const items = result.items;
+  result.summary = {
+    total,
+    applied: items.filter((item) => item.status === "applied").length,
+    preserved: items.filter((item) => item.status === "preserved").length,
+    changed_since_plan: items.filter((item) => Object.keys(item.changed_since_plan ?? {}).length > 0).length,
+    failed: items.filter((item) => item.status === "failed").length,
+    pending: items.filter((item) => item.status === "pending").length
+  };
+}
+
+function createResult(plan, resumeResult, now) {
+  const resumable = resumeResult?.plan_generated_at === (plan.generated_at ?? null) &&
+    Array.isArray(resumeResult?.items);
+  const knownItems = new Map((resumable ? resumeResult.items : [])
+    .map((item) => [resultItemKey(item), item]));
+  const result = {
+    generated_at: resumable ? resumeResult.generated_at : now(),
+    updated_at: now(),
+    plan_generated_at: plan.generated_at ?? null,
+    summary: {},
+    items: plan.items
+      .map((item) => knownItems.get(resultItemKey(item)))
+      .filter(Boolean)
+  };
+  updateSummary(result, plan.items.length);
+  return result;
 }
 
 export async function applyClassificationPlan({
@@ -93,56 +138,75 @@ export async function applyClassificationPlan({
   issuePauseMs = 250,
   batchPauseMs = 2000,
   batchSize = 20,
+  retrySleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  checkpoint = async () => {},
+  resumeResult,
   now = () => new Date().toISOString()
 } = {}) {
   if (!apply) throw new Error("Recusando escrita sem --apply");
   validatePlan(plan);
   if (typeof runGh !== "function") throw new Error("runGh e obrigatorio");
 
-  const result = {
-    generated_at: now(),
-    plan_generated_at: plan.generated_at ?? null,
-    summary: {total: plan.items.length, applied: 0, preserved: 0, changed_since_plan: 0, failed: 0},
-    items: []
-  };
+  const result = createResult(plan, resumeResult, now);
+  await checkpoint(result);
 
   for (let index = 0; index < plan.items.length; index += 1) {
     const item = plan.items[index];
+    const key = resultItemKey(item);
+    let record = result.items.find((entry) => resultItemKey(entry) === key);
+    if (record?.status === "applied" || record?.status === "preserved") continue;
     if (index > 0) await sleep(index % batchSize === 0 ? batchPauseMs : issuePauseMs);
+    if (!record) {
+      record = {
+        repository: item.repository,
+        number: item.number,
+        status: "pending",
+        attempts: 0,
+        attempted_fields: [],
+        attempted_field_values: [],
+        changed_since_plan: {}
+      };
+      result.items.push(record);
+    } else {
+      record.status = "pending";
+      delete record.error;
+    }
+    updateSummary(result, plan.items.length);
+    result.updated_at = now();
+    await checkpoint(result);
     try {
-      const current = await fetchIssueFields({...item, runGh});
-      const changed_since_plan = changedFields(item.current, current);
-      const payload = buildIssueFieldPayload({current, proposed: item.proposed}, fieldIds);
-      const fields = payload.issue_field_values.map(({field_id}) =>
-        CLASSIFICATION_FIELDS.find((field) => fieldIds[field] === field_id));
-
-      if (payload.issue_field_values.length > 0) {
-        await withRetry(() => runGh(apiArgs(
+      const outcome = await withRetry(async () => {
+        const current = await fetchIssueFields({...item, runGh});
+        const changed_since_plan = changedFields(item.current, current);
+        const payload = buildIssueFieldPayload({current, proposed: item.proposed}, fieldIds);
+        const attempted_fields = payload.issue_field_values.map(({field_id}) =>
+          CLASSIFICATION_FIELDS.find((field) => fieldIds[field] === field_id)).filter(Boolean);
+        Object.assign(record, {
+          status: "pending",
+          attempts: Number(record.attempts ?? 0) + 1,
+          attempted_fields,
+          attempted_field_values: payload.issue_field_values,
+          changed_since_plan
+        });
+        updateSummary(result, plan.items.length);
+        result.updated_at = now();
+        await checkpoint(result);
+        if (payload.issue_field_values.length === 0) return {status: "preserved"};
+        await runGh(apiArgs(
           `repos/${item.repository}/issues/${item.number}/issue-field-values`,
           {method: "POST", input: "-"}
-        ), {input: JSON.stringify(payload)}));
-        result.summary.applied += 1;
-      } else {
-        result.summary.preserved += 1;
-      }
-      if (Object.keys(changed_since_plan).length > 0) result.summary.changed_since_plan += 1;
-      result.items.push({
-        repository: item.repository,
-        number: item.number,
-        status: payload.issue_field_values.length > 0 ? "applied" : "preserved",
-        applied_fields: fields.filter(Boolean),
-        changed_since_plan
-      });
+        ), {input: JSON.stringify(payload)});
+        return {status: "applied"};
+      }, {sleep: retrySleep});
+      record.status = outcome.status;
     } catch (error) {
-      result.summary.failed += 1;
-      result.items.push({
-        repository: item.repository,
-        number: item.number,
-        status: "failed",
-        error: error.message
-      });
-      break;
+      record.status = "failed";
+      record.error = error.message;
     }
+    updateSummary(result, plan.items.length);
+    result.updated_at = now();
+    await checkpoint(result);
+    if (record.status === "failed") break;
   }
   return result;
 }
@@ -152,6 +216,15 @@ async function readJson(path, description) {
     return JSON.parse(await readFile(path, "utf8"));
   } catch (error) {
     throw new Error(`Falha ao ler ${description} em ${path}: ${error.message}`);
+  }
+}
+
+async function readOptionalJson(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return undefined;
+    throw new Error(`Falha ao ler resultado anterior em ${path}: ${error.message}`);
   }
 }
 
@@ -165,8 +238,15 @@ export async function main(argv = process.argv) {
     if (!apply) throw new Error("Recusando escrita sem --apply");
     const runGh = createRunGh({executable});
     const fieldIds = await fetchOrganizationFieldIds({org: plan.organization, runGh});
-    const result = await applyClassificationPlan({plan, fieldIds, runGh, apply});
-    await writeJsonAtomically(outputPath, result);
+    const resumeResult = await readOptionalJson(outputPath);
+    const result = await applyClassificationPlan({
+      plan,
+      fieldIds,
+      runGh,
+      apply,
+      resumeResult,
+      checkpoint: (state) => writeJsonAtomically(outputPath, state)
+    });
     console.log(`Aplicacao concluida: ${result.summary.applied} aplicada(s), ${result.summary.preserved} preservada(s), ${result.summary.failed} falha(s) em ${outputPath}`);
     if (result.summary.failed > 0) process.exitCode = 1;
   } catch (error) {

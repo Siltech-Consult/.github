@@ -128,7 +128,9 @@ A aplicacao usa apenas o plano completo, sem ambiguidades, e requer a
 confirmacao explicita `--apply`. Para cada issue, ela consulta novamente os
 Issue Fields imediatamente antes da escrita, preservando qualquer valor que
 tenha sido preenchido desde o dry-run. O resultado e gravado em
-`artifacts/issue-classification-result.json`.
+`artifacts/issue-classification-result.json` antes da primeira mutacao e apos
+cada issue, permitindo retomar uma aplicacao interrompida sem repetir issues
+ja concluidas.
 
 ```bash
 node scripts/apply-issue-classification.mjs \
@@ -146,12 +148,15 @@ Depois da aplicacao, gere um novo inventario e audite os valores com:
 ```bash
 node scripts/validate-open-issue-classification.mjs \
   --plan artifacts/issue-classification-plan.json \
+  --result artifacts/issue-classification-result.json \
   --output artifacts/issue-classification-audit.json
 ```
 
 A auditoria falha quando a quantidade de issues abertas mudou, algum dos
 quatro campos esta ausente, um valor anterior foi alterado ou um valor nao
-pertence as opcoes oficiais do Issue Field.
+pertence as opcoes oficiais do Issue Field. Ela tambem protege valores
+registrados em `changed_since_plan` e valida novas issues abertas, mesmo que
+nao existissem no plano original.
 
 ## Formularios
 

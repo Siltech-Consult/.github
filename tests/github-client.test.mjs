@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {mkdtemp, readdir, readFile} from "node:fs/promises";
+import {chmod, mkdtemp, readdir, readFile, rm, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import { inventoryOpenIssues } from "../scripts/lib/github-client.mjs";
+import { createRunGh, inventoryOpenIssues } from "../scripts/lib/github-client.mjs";
 
 test("normaliza campos e PRs vinculados", async () => {
   const calls = [];
@@ -34,6 +34,25 @@ test("normaliza campos e PRs vinculados", async () => {
   assert.equal(issues[0].repository, "Siltech-Consult/demo");
   assert.equal(issues[0].linkedPullRequests[0].state, "OPEN");
   assert.ok(calls.length >= 2);
+});
+
+test("preserva status e headers de rate limit retornados pelo gh", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "github-client-error-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const executable = join(directory, "gh");
+  await writeFile(executable, [
+    "#!/bin/sh",
+    "echo 'HTTP 403: secondary rate limit' >&2",
+    "echo 'Retry-After: 3' >&2",
+    "exit 1"
+  ].join("\n"), "utf8");
+  await chmod(executable, 0o755);
+
+  await assert.rejects(createRunGh({executable})(["api", "repos/demo"]), (error) => {
+    assert.equal(error.status, 403);
+    assert.equal(error.headers["retry-after"], "3");
+    return true;
+  });
 });
 
 test("normaliza resposta GraphQL e consulta IDs em lotes de 100", async () => {

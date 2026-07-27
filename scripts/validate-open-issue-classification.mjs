@@ -34,33 +34,58 @@ export function extractOfficialOptions(fields) {
   }));
 }
 
-export function auditOpenIssueClassification({plan, issues, officialOptions, now = () => new Date().toISOString()} = {}) {
+export function auditOpenIssueClassification({
+  plan,
+  result,
+  issues,
+  officialOptions,
+  now = () => new Date().toISOString()
+} = {}) {
   if (!plan || !Array.isArray(plan.items)) throw new Error("Plano deve conter items");
+  if (!result || !Array.isArray(result.items)) {
+    throw new Error("Resultado da aplicacao deve conter items");
+  }
   if (!Array.isArray(issues)) throw new Error("Inventario deve ser uma lista de issues");
   const failures = [];
   if (plan.items.length !== issues.length) {
     failures.push({type: "inventory_count_mismatch", planned: plan.items.length, audited: issues.length});
   }
 
-  const actual = new Map(issues.map((issue) => [issueKey(issue), issue]));
-  for (const item of plan.items) {
-    const issue = actual.get(issueKey(item));
-    if (!issue) continue;
+  const planned = new Map(plan.items.map((item) => [issueKey(item), item]));
+  const applied = new Map(result.items.map((item) => [issueKey(item), item]));
+  const actual = new Set();
+  for (const issue of issues) {
+    const key = issueKey(issue);
+    actual.add(key);
+    const item = planned.get(key);
+    const applyResult = applied.get(key);
     for (const field of CLASSIFICATION_FIELDS) {
-      const previous = item.current?.[field];
+      const previous = item?.current?.[field];
       const current = issue.fields?.[field];
       if (hasValue(previous) && previous !== current) {
-        failures.push({type: "previous_value_changed", issue: issueKey(item), field, planned: previous, audited: current ?? null});
+        failures.push({type: "previous_value_changed", issue: key, field, planned: previous, audited: current ?? null});
+      }
+      const changedSincePlan = applyResult?.changed_since_plan?.[field]?.current;
+      if (hasValue(changedSincePlan) && changedSincePlan !== current) {
+        failures.push({
+          type: "changed_since_plan_value_changed",
+          issue: key,
+          field,
+          expected: changedSincePlan,
+          audited: current ?? null
+        });
       }
       if (!hasValue(current)) {
-        failures.push({type: "missing_field", issue: issueKey(item), field});
+        failures.push({type: "missing_field", issue: key, field});
       } else if (!officialOptions?.[field]?.includes(current)) {
-        failures.push({type: "invalid_option", issue: issueKey(item), field, value: current});
+        failures.push({type: "invalid_option", issue: key, field, value: current});
       }
     }
   }
   for (const item of plan.items) {
-    if (!actual.has(issueKey(item))) failures.push({type: "missing_issue", issue: issueKey(item)});
+    if (!actual.has(issueKey(item))) {
+      failures.push({type: "missing_issue", issue: issueKey(item)});
+    }
   }
 
   return {
@@ -82,10 +107,14 @@ async function readJson(path, description) {
 
 export async function main(argv = process.argv) {
   const planPath = option("--plan", argv) ?? "artifacts/issue-classification-plan.json";
+  const resultPath = option("--result", argv) ?? "artifacts/issue-classification-result.json";
   const outputPath = option("--output", argv) ?? "artifacts/issue-classification-audit.json";
   const executable = option("--gh", argv) ?? process.env.GH_BIN ?? "gh";
   try {
-    const plan = await readJson(planPath, "plano");
+    const [plan, result] = await Promise.all([
+      readJson(planPath, "plano"),
+      readJson(resultPath, "resultado da aplicacao")
+    ]);
     const runGh = createRunGh({executable});
     const retryingRunGh = (args) => withRetry(() => runGh(args));
     const [issues, fields] = await Promise.all([
@@ -94,6 +123,7 @@ export async function main(argv = process.argv) {
     ]);
     const audit = auditOpenIssueClassification({
       plan,
+      result,
       issues,
       officialOptions: extractOfficialOptions(fields)
     });

@@ -90,11 +90,28 @@ const PULL_REQUEST_PAGE_QUERY = `query($id: ID!, $after: String) {
 export function createRunGh({executable = "gh"} = {}) {
   return async (args, {input} = {}) => {
     if (input !== undefined) return runGhWithInput(executable, args, input);
-    const {stdout} = await execFileAsync(executable, args, {
-      maxBuffer: 32 * 1024 * 1024
-    });
-    return JSON.parse(stdout);
+    try {
+      const {stdout} = await execFileAsync(executable, args, {
+        maxBuffer: 32 * 1024 * 1024
+      });
+      return JSON.parse(stdout);
+    } catch (error) {
+      throw enrichGhError(error);
+    }
   };
+}
+
+function enrichGhError(error) {
+  const output = `${error?.stderr ?? ""}\n${error?.message ?? ""}`;
+  const status = output.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+  if (status && error.status === undefined) error.status = Number(status);
+  const headers = {};
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^([A-Za-z][A-Za-z-]*):\s*(.+)$/);
+    if (match) headers[match[1].toLowerCase()] = match[2].trim();
+  }
+  if (Object.keys(headers).length > 0) error.headers = {...error.headers, ...headers};
+  return error;
 }
 
 function runGhWithInput(executable, args, input) {
@@ -106,7 +123,7 @@ function runGhWithInput(executable, args, input) {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", reject);
     child.on("close", (code) => {
-      if (code !== 0) return reject(new Error(stderr.trim() || `gh api exited with ${code}`));
+      if (code !== 0) return reject(enrichGhError(new Error(stderr.trim() || `gh api exited with ${code}`)));
       try {
         resolve(stdout.trim() === "" ? null : JSON.parse(stdout));
       } catch (error) {
