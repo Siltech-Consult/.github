@@ -78,7 +78,7 @@ test("retry usa Retry-After para limite secundario", async () => {
   assert.deepEqual(sleeps, [3000]);
 });
 
-test("retry usa reset de rate limit e 422 qualificado", async () => {
+test("retry usa reset de rate limit somente quando remaining e zero", async () => {
   const sleeps = [];
   let attempts = 0;
   const value = await withRetry(async () => {
@@ -86,7 +86,7 @@ test("retry usa reset de rate limit e 422 qualificado", async () => {
     if (attempts === 1) {
       const error = new Error("You have exceeded a secondary rate limit");
       error.status = 422;
-      error.headers = {"x-ratelimit-reset": "105"};
+      error.headers = {"x-ratelimit-reset": "105", "x-ratelimit-remaining": "0"};
       throw error;
     }
     return "ok";
@@ -94,6 +94,42 @@ test("retry usa reset de rate limit e 422 qualificado", async () => {
 
   assert.equal(value, "ok");
   assert.deepEqual(sleeps, [5000]);
+});
+
+test("422 de spam com remaining nao zero ignora reset e usa backoff", async () => {
+  const sleeps = [];
+  let attempts = 0;
+  const value = await withRetry(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("Validation Failed: endpoint has been spammed");
+      error.status = 422;
+      error.headers = {"x-ratelimit-reset": "999", "x-ratelimit-remaining": "12"};
+      throw error;
+    }
+    return "ok";
+  }, {now: () => 100_000, delays: [1234], sleep: async (milliseconds) => sleeps.push(milliseconds)});
+
+  assert.equal(value, "ok");
+  assert.deepEqual(sleeps, [1234]);
+});
+
+test("422 de spam usa Retry-After antes do backoff", async () => {
+  const sleeps = [];
+  let attempts = 0;
+  const value = await withRetry(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("Validation Failed: endpoint has been spammed");
+      error.status = 422;
+      error.headers = {"retry-after": "7", "x-ratelimit-remaining": "12"};
+      throw error;
+    }
+    return "ok";
+  }, {delays: [1234], sleep: async (milliseconds) => sleeps.push(milliseconds)});
+
+  assert.equal(value, "ok");
+  assert.deepEqual(sleeps, [7000]);
 });
 
 test("403 com reset sem sinal de limite nao recebe retry", async () => {

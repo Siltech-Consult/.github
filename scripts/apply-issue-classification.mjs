@@ -5,7 +5,7 @@ import {fileURLToPath} from "node:url";
 import {resolve} from "node:path";
 import {createRunGh} from "./lib/github-client.mjs";
 import {writeJsonAtomically} from "./lib/report.mjs";
-import {isTransientGitHubError, withRetry} from "./lib/retry.mjs";
+import {isAuthoritativeTransientMutationRejection, isTransientGitHubError, withRetry} from "./lib/retry.mjs";
 import {canonicalPlanDigest} from "./lib/plan-digest.mjs";
 
 export const CLASSIFICATION_FIELDS = ["Priority", "Workflow", "Effort", "Wave"];
@@ -52,7 +52,11 @@ function changedFields(planned = {}, current = {}) {
 function validatePlan(plan) {
   if (!plan || !Array.isArray(plan.items)) throw new Error("Plano deve conter items");
   if (Number(plan.summary?.ambiguous ?? 0) > 0) throw new Error("Plano possui classificacoes ambiguas");
+  const keys = new Set();
   for (const item of plan.items) {
+    const key = resultItemKey(item);
+    if (keys.has(key)) throw new Error(`Plano possui issue duplicada: ${key}`);
+    keys.add(key);
     const incomplete = CLASSIFICATION_FIELDS.filter((field) => !hasValue(item?.proposed?.[field]));
     if (incomplete.length > 0) {
       throw new Error(`${item?.repository}#${item?.number}: campos propostos ausentes: ${incomplete.join(", ")}`);
@@ -133,10 +137,99 @@ function createPendingRecord(item) {
   };
 }
 
+const RESULT_STATUSES = new Set(["pending", "applied", "preserved", "failed"]);
+const PREPARED_OUTCOMES = new Set(["in_flight", "preserved"]);
+const OUTCOME_OUTCOMES = new Set(["applied", "preserved", "authoritative_rejection", "uncertain", "confirmed_after_uncertain"]);
+const CONFIRMATION_OUTCOMES = new Set(["confirmed_after_uncertain", "not_applied_after_uncertain", "confirmation_failed"]);
+
+function validObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateAttemptHistory(record, key) {
+  if (!Array.isArray(record.attempts)) throw new Error(`Resultado anterior invalido para ${key}: attempts ausente`);
+  let openAttempt;
+  let lastAttempt = 0;
+  for (const entry of record.attempts) {
+    if (!validObject(entry)) throw new Error(`Resultado anterior invalido para ${key}: tentativa malformada`);
+    if (!Number.isInteger(entry.attempt) || entry.attempt < 1) {
+      throw new Error(`Resultado anterior invalido para ${key}: numero de tentativa invalido`);
+    }
+    if (!validObject(entry.payload) || !Array.isArray(entry.payload.issue_field_values) || !validObject(entry.changed_since_plan)) {
+      throw new Error(`Resultado anterior invalido para ${key}: tentativa sem payload ou changed_since_plan valido`);
+    }
+    if (entry.payload.issue_field_values.some((value) =>
+      !validObject(value) || !hasValue(value.field_id) || !hasValue(value.value))) {
+      throw new Error(`Resultado anterior invalido para ${key}: payload de tentativa malformado`);
+    }
+    if (entry.phase === "prepared") {
+      if (openAttempt || entry.attempt !== lastAttempt + 1 || !PREPARED_OUTCOMES.has(entry.outcome)) {
+        throw new Error(`Resultado anterior invalido para ${key}: historico de tentativas nao append-only`);
+      }
+      openAttempt = entry;
+      lastAttempt = entry.attempt;
+      continue;
+    }
+    if (entry.phase === "outcome") {
+      if (!openAttempt || entry.attempt !== openAttempt.attempt || !OUTCOME_OUTCOMES.has(entry.outcome) ||
+        JSON.stringify(entry.payload) !== JSON.stringify(openAttempt.payload) ||
+        JSON.stringify(entry.changed_since_plan) !== JSON.stringify(openAttempt.changed_since_plan)) {
+        throw new Error(`Resultado anterior invalido para ${key}: historico de tentativas nao append-only`);
+      }
+      openAttempt = entry.outcome === "uncertain" ? {...entry, awaiting_confirmation: true} : undefined;
+      continue;
+    }
+    if (entry.phase === "confirmation") {
+      if (!openAttempt?.awaiting_confirmation || entry.attempt !== openAttempt.attempt ||
+        !CONFIRMATION_OUTCOMES.has(entry.outcome) ||
+        JSON.stringify(entry.payload) !== JSON.stringify(openAttempt.payload) ||
+        JSON.stringify(entry.changed_since_plan) !== JSON.stringify(openAttempt.changed_since_plan)) {
+        throw new Error(`Resultado anterior invalido para ${key}: historico de tentativas nao append-only`);
+      }
+      openAttempt = undefined;
+      continue;
+    }
+    throw new Error(`Resultado anterior invalido para ${key}: fase de tentativa invalida`);
+  }
+  if (openAttempt && record.status !== "pending" && record.status !== "failed") {
+    throw new Error(`Resultado anterior invalido para ${key}: tentativa em voo com estado terminal`);
+  }
+}
+
+function validateResumeResult(plan, resumeResult, planDigest) {
+  if (!validObject(resumeResult)) throw new Error("Resultado anterior invalido: objeto ausente");
+  if (resumeResult.plan_digest !== planDigest) throw new Error("Resultado anterior invalido: digest do plano nao confere");
+  if (!Array.isArray(resumeResult.items)) throw new Error("Resultado anterior invalido: items ausente");
+  if (resumeResult.items.length !== plan.items.length) throw new Error("Resultado anterior invalido: quantidade de issues nao confere");
+
+  const planned = new Map(plan.items.map((item) => [resultItemKey(item), item]));
+  const seen = new Set();
+  for (const record of resumeResult.items) {
+    if (!validObject(record)) throw new Error("Resultado anterior invalido: registro malformado");
+    const key = resultItemKey(record);
+    const plannedItem = planned.get(key);
+    if (!plannedItem) throw new Error(`Resultado anterior invalido: issue nao planejada ${key}`);
+    if (seen.has(key)) throw new Error(`Resultado anterior invalido: issue duplicada ${key}`);
+    if (record.repository !== plannedItem.repository || record.number !== plannedItem.number) {
+      throw new Error(`Resultado anterior invalido: identidade da issue malformada ${key}`);
+    }
+    if (!RESULT_STATUSES.has(record.status)) throw new Error(`Resultado anterior invalido: status invalido para ${key}`);
+    if (!validObject(record.changed_since_plan) || !Array.isArray(record.attempted_fields) ||
+      !Array.isArray(record.attempted_field_values)) {
+      throw new Error(`Resultado anterior invalido: campos duraveis ausentes para ${key}`);
+    }
+    validateAttemptHistory(record, key);
+    seen.add(key);
+  }
+  for (const key of planned.keys()) {
+    if (!seen.has(key)) throw new Error(`Resultado anterior invalido: issue ausente ${key}`);
+  }
+}
+
 function createResult(plan, resumeResult, planDigest, now) {
-  const resumable = resumeResult?.plan_digest === planDigest && Array.isArray(resumeResult?.items);
-  const knownItems = new Map((resumable ? resumeResult.items : [])
-    .map((item) => [resultItemKey(item), item]));
+  const resumable = resumeResult !== undefined;
+  if (resumable) validateResumeResult(plan, resumeResult, planDigest);
+  const knownItems = new Map((resumable ? resumeResult.items : []).map((item) => [resultItemKey(item), item]));
   const result = {
     generated_at: resumable ? resumeResult.generated_at : now(),
     updated_at: now(),
@@ -160,6 +253,16 @@ function payloadApplied(payload, current, fieldIds) {
     const field = CLASSIFICATION_FIELDS.find((name) => fieldIds[name] === field_id);
     return field && current[field] === value;
   });
+}
+
+function unfinishedAttempt(record) {
+  const last = record.attempts.at(-1);
+  return last?.phase === "prepared" ? last : undefined;
+}
+
+function awaitingConfirmationAttempt(record) {
+  const last = record.attempts.at(-1);
+  return last?.phase === "outcome" && last.outcome === "uncertain" ? last : undefined;
 }
 
 export async function applyClassificationPlan({
@@ -189,6 +292,63 @@ export async function applyClassificationPlan({
     const key = resultItemKey(item);
     let record = result.items.find((entry) => resultItemKey(entry) === key);
     if (record.status !== "pending") continue;
+    const interrupted = unfinishedAttempt(record);
+    if (interrupted) {
+      if (interrupted.outcome === "preserved") {
+        record.attempts.push({...interrupted, phase: "outcome", outcome: "preserved"});
+        record.status = "preserved";
+      } else {
+        try {
+          const confirmed = await withRetry(
+            () => fetchIssueFields({...item, runGh}),
+            {sleep: retrySleep, shouldRetry: isTransientGitHubError}
+          );
+          if (payloadApplied(interrupted.payload, confirmed, fieldIds)) {
+            record.attempts.push({...interrupted, phase: "outcome", outcome: "confirmed_after_uncertain"});
+            record.status = "applied";
+          } else {
+            record.attempts.push({...interrupted, phase: "outcome", outcome: "uncertain", error: "POST interrompido sem confirmacao"});
+            record.status = "failed";
+            record.error = "POST interrompido sem confirmacao; retomada nao repetiu a mutacao";
+          }
+        } catch (error) {
+          record.attempts.push({...interrupted, phase: "outcome", outcome: "uncertain", error: error.message});
+          record.status = "failed";
+          record.error = `Falha ao confirmar POST interrompido: ${error.message}`;
+        }
+      }
+      updateSummary(result, plan.items.length);
+      result.updated_at = now();
+      await checkpoint(result);
+      if (record.status === "failed") break;
+      continue;
+    }
+    const uncertain = awaitingConfirmationAttempt(record);
+    if (uncertain) {
+      try {
+        const confirmed = await withRetry(
+          () => fetchIssueFields({...item, runGh}),
+          {sleep: retrySleep, shouldRetry: isTransientGitHubError}
+        );
+        if (payloadApplied(uncertain.payload, confirmed, fieldIds)) {
+          record.attempts.push({...uncertain, phase: "confirmation", outcome: "confirmed_after_uncertain"});
+          record.status = "applied";
+        } else {
+          record.attempts.push({...uncertain, phase: "confirmation", outcome: "not_applied_after_uncertain"});
+          record.status = "failed";
+          record.error = "POST incerto sem confirmacao; retomada nao repetiu a mutacao";
+        }
+      } catch (error) {
+        record.attempts.push({...uncertain, phase: "confirmation", outcome: "confirmation_failed", error: error.message});
+        record.status = "failed";
+        record.error = `Falha ao confirmar POST incerto: ${error.message}`;
+      }
+      updateSummary(result, plan.items.length);
+      result.updated_at = now();
+      await checkpoint(result);
+      if (record.status === "failed") break;
+      continue;
+    }
     if (index > 0) await sleep(index % batchSize === 0 ? batchPauseMs : issuePauseMs);
     try {
       const outcome = await withRetry(async () => {
@@ -213,7 +373,10 @@ export async function applyClassificationPlan({
         updateSummary(result, plan.items.length);
         result.updated_at = now();
         await checkpoint(result);
-        if (payload.issue_field_values.length === 0) return {status: "preserved"};
+        if (payload.issue_field_values.length === 0) {
+          record.attempts.push({...attempt, phase: "outcome", outcome: "preserved"});
+          return {status: "preserved"};
+        }
         try {
           await runGh(apiArgs(
             `repos/${item.repository}/issues/${item.number}/issue-field-values`,
@@ -222,14 +385,21 @@ export async function applyClassificationPlan({
           record.attempts.push({...attempt, phase: "outcome", outcome: "applied"});
           return {status: "applied"};
         } catch (error) {
-          record.attempts.push({...attempt, phase: "outcome", outcome: "uncertain", error: error.message});
+          const authoritativeRejection = isAuthoritativeTransientMutationRejection(error);
+          record.attempts.push({
+            ...attempt,
+            phase: "outcome",
+            outcome: authoritativeRejection ? "authoritative_rejection" : "uncertain",
+            error: error.message
+          });
           updateSummary(result, plan.items.length);
           result.updated_at = now();
           await checkpoint(result);
+          if (authoritativeRejection) throw error;
           try {
             const confirmed = await fetchIssueFields({...item, runGh});
             if (payloadApplied(payload, confirmed, fieldIds)) {
-              record.attempts.push({...attempt, phase: "outcome", outcome: "confirmed_after_uncertain"});
+              record.attempts.push({...attempt, phase: "confirmation", outcome: "confirmed_after_uncertain"});
               return {status: "applied"};
             }
           } catch (confirmationError) {
@@ -240,7 +410,7 @@ export async function applyClassificationPlan({
         }
       }, {
         sleep: retrySleep,
-        shouldRetry: (error) => !error.uncertainMutation && isTransientGitHubError(error)
+        shouldRetry: isAuthoritativeTransientMutationRejection
       });
       record.status = outcome.status;
     } catch (error) {

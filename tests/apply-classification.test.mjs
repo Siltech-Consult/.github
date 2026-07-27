@@ -95,9 +95,10 @@ test("rele campos antes de escrever e preserva valor preenchido apos plano", asy
   });
 });
 
-test("rele e remonta payload em cada retry de mutacao", async () => {
+test("rele e remonta payload apos rejeicao 429 autoritativa do POST", async () => {
   const payloads = [];
   let reads = 0;
+  let posts = 0;
   const result = await applyClassificationPlan({
     plan: {summary: {ambiguous: 0}, items: [item]},
     fieldIds,
@@ -109,25 +110,78 @@ test("rele e remonta payload em cada retry de mutacao", async () => {
       if (!args.includes("--method") && endpoint) {
         reads += 1;
         if (reads === 1) {
-          const error = new Error("rate limited while reading");
-          error.status = 429;
-          throw error;
+          return [{issue_field_name: "Priority", single_select_option: {name: "P1"}}];
         }
         return [
-            {issue_field_name: "Priority", single_select_option: {name: "P1"}},
-            {issue_field_name: "Workflow", single_select_option: {name: "Ready"}}
-          ];
+          {issue_field_name: "Priority", single_select_option: {name: "P1"}},
+          {issue_field_name: "Workflow", single_select_option: {name: "Ready"}}
+        ];
       }
       if (args.includes("--method")) {
         payloads.push(JSON.parse(input));
+        posts += 1;
+        if (posts === 1) {
+          const error = new Error("rate limited");
+          error.status = 429;
+          throw error;
+        }
       }
       return {};
     }
   });
 
   assert.equal(reads, 2);
-  assert.deepEqual(payloads.map((payload) => payload.issue_field_values.map((value) => value.field_id)), [[3, 4]]);
+  assert.deepEqual(payloads.map((payload) => payload.issue_field_values.map((value) => value.field_id)), [[2, 3, 4], [3, 4]]);
   assert.deepEqual(result.items[0].attempted_fields, ["Effort", "Wave"]);
+});
+
+test("repete POST para 403 de rate limit e 422 de spam qualificados", async () => {
+  for (const rejection of [
+    {status: 403, message: "secondary rate limit"},
+    {status: 422, message: "Validation Failed: endpoint has been spammed"}
+  ]) {
+    let posts = 0;
+    const result = await applyClassificationPlan({
+      plan: {summary: {ambiguous: 0}, items: [item]},
+      fieldIds,
+      apply: true,
+      sleep: async () => {},
+      retrySleep: async () => {},
+      runGh: async (args) => {
+        if (!args.includes("--method")) return [];
+        posts += 1;
+        if (posts === 1) {
+          const error = new Error(rejection.message);
+          error.status = rejection.status;
+          throw error;
+        }
+        return {};
+      }
+    });
+    assert.equal(posts, 2);
+    assert.equal(result.items[0].status, "applied");
+  }
+});
+
+test("nao repete POST para 403 permanente", async () => {
+  let posts = 0;
+  const result = await applyClassificationPlan({
+    plan: {summary: {ambiguous: 0}, items: [item]},
+    fieldIds,
+    apply: true,
+    sleep: async () => {},
+    retrySleep: async () => {},
+    runGh: async (args) => {
+      if (!args.includes("--method")) return [];
+      posts += 1;
+      const error = new Error("resource not accessible by integration");
+      error.status = 403;
+      throw error;
+    }
+  });
+
+  assert.equal(posts, 1);
+  assert.equal(result.items[0].status, "failed");
 });
 
 test("le todas as paginas de Issue Fields antes de aplicar", async () => {
@@ -242,8 +296,8 @@ test("retoma checkpoint sem repetir issue ja aplicada", async () => {
       plan_generated_at: "2026-07-27T00:00:00Z",
       plan_digest: canonicalPlanDigest({generated_at: "2026-07-27T00:00:00Z", summary: {ambiguous: 0}, items: [item, laterItem]}),
       items: [
-        {repository: item.repository, number: item.number, status: "applied", attempts: []},
-        {repository: laterItem.repository, number: laterItem.number, status: "pending", attempts: []}
+        {repository: item.repository, number: item.number, status: "applied", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []},
+        {repository: laterItem.repository, number: laterItem.number, status: "pending", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []}
       ]
     },
     runGh: async (args) => {
@@ -258,14 +312,14 @@ test("retoma checkpoint sem repetir issue ja aplicada", async () => {
   assert.equal(result.items.find((entry) => entry.number === 8).attempts.length, 2);
 });
 
-test("nao retoma resultado de plano diferente com mesmo generated_at", async () => {
+test("recusa resultado de plano com digest diferente", async () => {
   const changedPlan = {
     generated_at: "2026-07-27T00:00:00Z",
     summary: {ambiguous: 0},
     items: [{...item, proposed: {...item.proposed, Workflow: "Ready"}}]
   };
-  const calls = [];
-  const result = await applyClassificationPlan({
+  let calls = 0;
+  await assert.rejects(applyClassificationPlan({
     plan: changedPlan,
     fieldIds,
     apply: true,
@@ -273,17 +327,116 @@ test("nao retoma resultado de plano diferente com mesmo generated_at", async () 
     resumeResult: {
       plan_generated_at: changedPlan.generated_at,
       plan_digest: canonicalPlanDigest({...changedPlan, items: [item]}),
-      items: [{repository: item.repository, number: item.number, status: "applied", attempts: []}]
+      items: [{repository: item.repository, number: item.number, status: "applied", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []}]
+    },
+    runGh: async () => {
+      calls += 1;
+      return {};
+    }
+  }), /digest/);
+
+  assert.equal(calls, 0);
+});
+
+test("recusa artefatos de retomada duplicados, incompletos, nao planejados ou malformados", async () => {
+  const second = {...item, number: 8};
+  const plan = {summary: {ambiguous: 0}, items: [item, second]};
+  const digest = canonicalPlanDigest(plan);
+  const base = {
+    plan_digest: digest,
+    items: [
+      {repository: item.repository, number: item.number, status: "pending", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []},
+      {repository: second.repository, number: second.number, status: "pending", attempts: [], changed_since_plan: {}, attempted_fields: [], attempted_field_values: []}
+    ]
+  };
+  const invalidResults = [
+    {...base, items: [base.items[0], base.items[0]]},
+    {...base, items: [base.items[0]]},
+    {...base, items: [base.items[0], {repository: "Siltech-Consult/other", number: 9, status: "pending", attempts: []}]},
+    {...base, items: [{...base.items[0], attempts: [{attempt: 1, phase: "outcome", payload: {issue_field_values: []}, changed_since_plan: {}, outcome: "applied"}]}, base.items[1]]}
+  ];
+
+  for (const resumeResult of invalidResults) {
+    let calls = 0;
+    await assert.rejects(applyClassificationPlan({
+      plan,
+      fieldIds,
+      apply: true,
+      resumeResult,
+      runGh: async () => { calls += 1; }
+    }), /resultado anterior/i);
+    assert.equal(calls, 0);
+  }
+});
+
+test("retomada nao repete POST interrompido sem confirmacao", async () => {
+  const plan = {summary: {ambiguous: 0}, items: [item]};
+  const payload = buildIssueFieldPayload(item, fieldIds);
+  let posts = 0;
+  const result = await applyClassificationPlan({
+    plan,
+    fieldIds,
+    apply: true,
+    resumeResult: {
+      plan_digest: canonicalPlanDigest(plan),
+      items: [{
+        repository: item.repository,
+        number: item.number,
+        status: "pending",
+        attempted_fields: ["Workflow", "Effort", "Wave"],
+        attempted_field_values: payload.issue_field_values,
+        changed_since_plan: {},
+        attempts: [{attempt: 1, phase: "prepared", payload, changed_since_plan: {}, outcome: "in_flight"}]
+      }]
     },
     runGh: async (args) => {
-      calls.push(args);
-      if (!args.includes("--method")) return [];
-      return {};
+      if (args.includes("--method")) posts += 1;
+      return [{issue_field_name: "Priority", single_select_option: {name: "P1"}}];
     }
   });
 
-  assert.equal(calls.some((args) => issueFieldEndpoint(args)?.includes("/7/")), true);
-  assert.equal(result.plan_digest, canonicalPlanDigest(changedPlan));
+  assert.equal(posts, 0);
+  assert.equal(result.items[0].status, "failed");
+  assert.equal(result.items[0].attempts.at(-1).outcome, "uncertain");
+});
+
+test("retomada confirma POST ambiguo pendente sem repeti-lo", async () => {
+  const plan = {summary: {ambiguous: 0}, items: [item]};
+  const payload = buildIssueFieldPayload(item, fieldIds);
+  let posts = 0;
+  const result = await applyClassificationPlan({
+    plan,
+    fieldIds,
+    apply: true,
+    resumeResult: {
+      plan_digest: canonicalPlanDigest(plan),
+      items: [{
+        repository: item.repository,
+        number: item.number,
+        status: "pending",
+        attempted_fields: ["Workflow", "Effort", "Wave"],
+        attempted_field_values: payload.issue_field_values,
+        changed_since_plan: {},
+        attempts: [
+          {attempt: 1, phase: "prepared", payload, changed_since_plan: {}, outcome: "in_flight"},
+          {attempt: 1, phase: "outcome", payload, changed_since_plan: {}, outcome: "uncertain", error: "connection reset"}
+        ]
+      }]
+    },
+    runGh: async (args) => {
+      if (args.includes("--method")) posts += 1;
+      return [
+        {issue_field_name: "Priority", single_select_option: {name: "P1"}},
+        {issue_field_name: "Workflow", single_select_option: {name: "Backlog"}},
+        {issue_field_name: "Effort", single_select_option: {name: "M"}},
+        {issue_field_name: "Wave", single_select_option: {name: "Onda 1"}}
+      ];
+    }
+  });
+
+  assert.equal(posts, 0);
+  assert.equal(result.items[0].status, "applied");
+  assert.equal(result.items[0].attempts.at(-1).phase, "confirmation");
 });
 
 test("mantem todos os itens pendentes e historico append-only apos falha incerta", async () => {

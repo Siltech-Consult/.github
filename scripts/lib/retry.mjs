@@ -25,6 +25,11 @@ function isRateLimited(error) {
     headerValue(error, "retry-after") !== undefined;
 }
 
+export function isAuthoritativeTransientMutationRejection(error) {
+  const status = Number(error?.status ?? error?.statusCode);
+  return status === 429 || ((status === 403 || status === 422) && isRateLimited(error));
+}
+
 export function isTransientGitHubError(error) {
   const status = errorStatus(error);
   if (status === 403 || status === 422) return isRateLimited(error);
@@ -41,8 +46,11 @@ export function retryDelayMilliseconds(error, fallback, {now = Date.now} = {}) {
     const timestamp = Date.parse(retryAfter);
     if (Number.isFinite(timestamp)) return Math.max(0, timestamp - now());
   }
+  const remaining = String(headerValue(error, "x-ratelimit-remaining") ?? "").trim();
   const reset = Number(headerValue(error, "x-ratelimit-reset"));
-  if (Number.isFinite(reset) && reset >= 0) return Math.max(0, reset * 1000 - now());
+  if (remaining === "0" && Number.isFinite(reset) && reset >= 0) {
+    return Math.max(0, reset * 1000 - now());
+  }
   return fallback;
 }
 
