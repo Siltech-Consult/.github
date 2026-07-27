@@ -197,9 +197,10 @@ function manifestStructureFailure(manifest, organization) {
   if (!["pending_create", "bound"].includes(manifest.state)) return {type: "invalid_project_manifest", reason: "state invalido"};
   const pending = manifest.pendingCreate;
   if (!pending || typeof pending !== "object" || pending.organization !== organization || pending.title !== DELIVERY_PROJECT_TITLE ||
-    typeof pending.runNonce !== "string" || pending.runNonce === "" || typeof pending.timestamp !== "string" || pending.timestamp === "") {
+    typeof pending.runNonce !== "string" || pending.runNonce === "") {
     return {type: "invalid_project_manifest", reason: "pendingCreate invalido"};
   }
+  if (!validIsoTimestamp(pending.timestamp)) return {type: "invalid_project_manifest", reason: "timestamp pendente invalido"};
   if (!manifest.issueFields || typeof manifest.issueFields !== "object" || Array.isArray(manifest.issueFields)) return {type: "invalid_project_manifest", reason: "issueFields invalido"};
   for (const [name, mapping] of Object.entries(manifest.issueFields)) {
     if (!CLASSIFICATION_FIELDS.includes(name) || !mapping || typeof mapping !== "object" || mapping.name !== name ||
@@ -209,11 +210,26 @@ function manifestStructureFailure(manifest, organization) {
   }
   if (manifest.state === "pending_create") {
     if (manifest.project !== null) return {type: "invalid_project_manifest", reason: "Project pendente nao pode ter ID"};
+    if (Object.keys(manifest.issueFields).length !== 0) return {type: "invalid_project_manifest", reason: "Project pendente nao pode ter mappings"};
   } else if (!manifest.project || typeof manifest.project !== "object" || typeof manifest.project.id !== "string" || manifest.project.id === "" ||
+    !Number.isInteger(manifest.project.number) || manifest.project.number < 1 || !githubUrl(manifest.project.url) ||
     manifest.project.title !== DELIVERY_PROJECT_TITLE || manifest.project.owner !== pending.organization) {
     return {type: "invalid_project_manifest", reason: "Project vinculado invalido"};
   }
   return null;
+}
+
+function validIsoTimestamp(value) {
+  if (typeof value !== "string" || value === "") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function githubUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.pathname !== "/";
+  } catch { return false; }
 }
 
 function manifestFailure(manifest, project, organization) {
@@ -272,10 +288,27 @@ export async function createOrReuseDeliveryProject({organization, runGh, apply =
   let manifest = suppliedManifest;
   if (existing.project) {
     if (manifest?.state === "pending_create") {
-      bindManifest(manifest, existing.project, organization);
-      await persistManifest(writeManifest, manifestPath, manifest);
+      if (apply) {
+        bindManifest(manifest, existing.project, organization);
+        await persistManifest(writeManifest, manifestPath, manifest);
+      }
+    } else if (manifest?.state === "bound" && manifest.project.id !== existing.project.id) {
+      throw new Error("Project vinculado divergente; execute reset manual do manifest antes de continuar");
     }
     return {created: false, project: existing.project, manifest};
+  }
+  if (manifest?.state === "bound") {
+    throw new Error("Project vinculado ausente; execute reset manual do manifest antes de continuar");
+  }
+  if (manifest?.state === "pending_create") {
+    const recovered = await reconcileExactProject({organization, runGh, retrySleep});
+    if (recovered) {
+      if (apply) {
+        bindManifest(manifest, recovered.project, organization);
+        await persistManifest(writeManifest, manifestPath, manifest);
+      }
+      return {created: false, project: recovered.project, manifest};
+    }
   }
   if (!apply) throw new Error("Recusando criar Project sem --apply");
   manifest ??= pendingCreateManifest({organization, runNonce, now});
@@ -304,6 +337,15 @@ export async function createOrReuseDeliveryProject({organization, runGh, apply =
     }
   }
   throw new Error("Create Project esgotado");
+}
+
+async function reconcileExactProject({organization, runGh, retrySleep}) {
+  for (let readAttempt = 0; readAttempt <= CREATE_DELAYS.length; readAttempt += 1) {
+    const existing = await findDeliveryProject({organization, runGh});
+    if (existing.project) return existing;
+    if (readAttempt < CREATE_DELAYS.length) await retrySleep(CREATE_DELAYS[readAttempt]);
+  }
+  return null;
 }
 
 export async function applyProjectOperations({projectId, operations, fieldNamesById = {}, manifest, runGh, apply = false, batchSize = 20, itemPauseMs = 250, batchPauseMs = 2000, sleep: pause = sleep, retrySleep = sleep, checkpoint = async () => {}} = {}) {

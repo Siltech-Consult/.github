@@ -112,7 +112,7 @@ test("validador exige projeto privado, campos oficiais unicos e inventario compl
       schemaVersion: 2,
       state: "bound",
       pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "run-0", timestamp: "2026-07-27T00:00:00.000Z"},
-      project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult"},
+      project: {id: "PVT_1", number: 7, title: "Siltech Delivery", owner: "Siltech-Consult", url: "https://github.com/orgs/Siltech-Consult/projects/7"},
       issueFields: {
         Priority: {issueFieldId: "IF_PRIORITY", projectFieldId: "PF_PRIORITY", name: "Priority", dataType: "SINGLE_SELECT"},
         Workflow: {issueFieldId: "IF_WORKFLOW", projectFieldId: "PF_WORKFLOW", name: "Workflow", dataType: "SINGLE_SELECT"},
@@ -244,6 +244,121 @@ test("persiste create pendente antes da mutacao e vincula Project recuperado", a
   assert.deepEqual(states.map((state) => state.state), ["pending_create", "bound"]);
   assert.equal(states[0].pendingCreate.runNonce, "run-1");
   assert.equal(states[1].project.id, "PVT_1");
+});
+
+test("retomada pendente reconcilia janela completa antes de nova criacao", async () => {
+  let finds = 0;
+  let creates = 0;
+  const manifest = {
+    schemaVersion: 2,
+    state: "pending_create",
+    pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "restart-1", timestamp: "2026-07-27T00:00:00.000Z"},
+    project: null,
+    issueFields: {}
+  };
+  const result = await createOrReuseDeliveryProject({
+    organization: "Siltech-Consult",
+    manifest,
+    apply: true,
+    retrySleep: async () => {},
+    writeManifest: async () => {},
+    runGh: async (args) => {
+      const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+      if (query.includes("createProjectV2")) { creates += 1; throw new Error("nao deveria criar"); }
+      finds += 1;
+      return {data: {organization: {id: "ORG_1", projectsV2: {
+        nodes: finds < 3 ? [] : [{id: "PVT_1", number: 7, title: "Siltech Delivery", url: "https://github.com/orgs/Siltech-Consult/projects/7", public: false, owner: {login: "Siltech-Consult"}}],
+        pageInfo: {hasNextPage: false, endCursor: null}
+      }}}};
+    }
+  });
+  assert.equal(result.project.id, "PVT_1");
+  assert.equal(creates, 0);
+  assert.equal(manifest.state, "bound");
+});
+
+test("bound ID divergente falha fechado sem rebind ou create", async () => {
+  const manifest = {
+    schemaVersion: 2,
+    state: "bound",
+    pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "bound-1", timestamp: "2026-07-27T00:00:00.000Z"},
+    project: {id: "PVT_RECORDED", number: 7, title: "Siltech Delivery", owner: "Siltech-Consult", url: "https://github.com/orgs/Siltech-Consult/projects/7"},
+    issueFields: {}
+  };
+  await assert.rejects(createOrReuseDeliveryProject({
+    organization: "Siltech-Consult",
+    manifest,
+    apply: true,
+    writeManifest: async () => { throw new Error("nao deveria gravar"); },
+    runGh: async () => ({data: {organization: {id: "ORG_1", projectsV2: {
+      nodes: [{id: "PVT_OTHER", number: 8, title: "Siltech Delivery", url: "https://github.com/orgs/Siltech-Consult/projects/8", public: false, owner: {login: "Siltech-Consult"}}],
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }}}})
+  }), /reset manual do manifest/);
+  assert.equal(manifest.project.id, "PVT_RECORDED");
+});
+
+test("apply false nao grava bind de manifest pendente", async () => {
+  let writes = 0;
+  const manifest = {
+    schemaVersion: 2,
+    state: "pending_create",
+    pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "dry-1", timestamp: "2026-07-27T00:00:00.000Z"},
+    project: null,
+    issueFields: {}
+  };
+  await createOrReuseDeliveryProject({
+    organization: "Siltech-Consult",
+    manifest,
+    apply: false,
+    writeManifest: async () => { writes += 1; },
+    runGh: async () => ({data: {organization: {id: "ORG_1", projectsV2: {
+      nodes: [{id: "PVT_1", number: 7, title: "Siltech Delivery", url: "https://github.com/orgs/Siltech-Consult/projects/7", public: false, owner: {login: "Siltech-Consult"}}],
+      pageInfo: {hasNextPage: false, endCursor: null}
+    }}}})
+  });
+  assert.equal(writes, 0);
+  assert.equal(manifest.state, "pending_create");
+});
+
+test("validador exige timestamp ISO e metadados completos em bound", () => {
+  const base = {
+    schemaVersion: 2,
+    state: "bound",
+    pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "type-1", timestamp: "not-a-date"},
+    project: {id: "PVT_1", number: 0, title: "Siltech Delivery", owner: "Siltech-Consult", url: "not-url"},
+    issueFields: {}
+  };
+  const audit = validateDeliveryProject({
+    project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult", public: false, projectFields: []},
+    requiredIssueFields: {Priority: "IF_PRIORITY", Workflow: "IF_WORKFLOW", Effort: "IF_EFFORT", Wave: "IF_WAVE"},
+    manifest: base,
+    issues: []
+  });
+  assert.equal(audit.failures[0].type, "invalid_project_manifest");
+  assert.match(audit.failures[0].reason, /timestamp/);
+});
+
+test("validador recusa numero ou URL invalidos em bound", () => {
+  for (const project of [
+    {id: "PVT_1", number: 0, title: "Siltech Delivery", owner: "Siltech-Consult", url: "https://github.com/orgs/Siltech-Consult/projects/7"},
+    {id: "PVT_1", number: 7, title: "Siltech Delivery", owner: "Siltech-Consult", url: "http://example.test/project/7"}
+  ]) {
+    const audit = validateDeliveryProject({
+      project: {id: "PVT_1", title: "Siltech Delivery", owner: "Siltech-Consult", public: false, projectFields: []},
+      requiredIssueFields: {Priority: "IF_PRIORITY", Workflow: "IF_WORKFLOW", Effort: "IF_EFFORT", Wave: "IF_WAVE"},
+      manifest: {
+        schemaVersion: 2,
+        state: "bound",
+        pendingCreate: {organization: "Siltech-Consult", title: "Siltech Delivery", runNonce: "type-2", timestamp: "2026-07-27T00:00:00.000Z"},
+        project,
+        issueFields: {}
+      },
+      issues: []
+    });
+    assert.equal(audit.failures[0].type, "invalid_project_manifest");
+    assert.match(audit.failures[0].reason, /Project vinculado/);
+  }
 });
 
 test("le items arquivados e preserva content IDs duplicados para auditoria", async () => {

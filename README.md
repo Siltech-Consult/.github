@@ -179,6 +179,10 @@ Antes de criar Project, o manifest registra estado `pending_create`, organizacao
 titulo, nonce e timestamp. Em erro transitivo, o processo consulta o Project por
 owner/titulo em janela limitada antes de tentar outra criacao e vincula o ID
 recuperado atomicamente.
+Em retomada `pending_create`, essa janela acontece antes de qualquer nova
+mutacao de criacao. Estado `bound` e imutavel: ID divergente ou ausente exige
+reset manual do manifest. Execucoes sem `--apply` nao gravam nem vinculam
+manifest.
 
 ```bash
 node scripts/create-delivery-project.mjs \
