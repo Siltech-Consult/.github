@@ -207,6 +207,10 @@ owner, visibilidade, campos oficiais, nomes duplicados de campos ou content
 IDs do inventario divergirem. A consulta inclui items arquivados e exige cada
 content ID do inventario exatamente uma vez.
 
+As views operacionais, movimentacao de Workflow, rotina de classificacao e
+sincronizacao, inclusao de novas issues e rotacao do token estao no
+[runbook do Siltech Delivery](docs/siltech-delivery-project.md).
+
 ## Formularios
 
 Os formularios em `.github/ISSUE_TEMPLATE` funcionam como padrao para
