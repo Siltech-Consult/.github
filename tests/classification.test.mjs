@@ -101,6 +101,26 @@ test("override resolve ambiguidade com justificativa", () => {
   assert.match(result.sources.Effort, /override/);
 });
 
+test("le prioridade em titulo com prefixos compostos", () => {
+  for (const [title, expected] of [
+    ["[Bug][P0] Correlacionar identidades", "P0"],
+    ["[Incidentes][P1] Separar qualidade", "P1"],
+    ["P2 - Melhorar fallback", "P2"]
+  ]) {
+    const result = classifyIssue({
+      repository: "Siltech-Consult/Report-Worker",
+      number: 1,
+      title,
+      body: "",
+      labels: [],
+      fields: {},
+      linkedPullRequests: []
+    }, rules, {});
+
+    assert.equal(result.proposed.Priority, expected);
+  }
+});
+
 test("valores nulos e vazios recebem classificacao", () => {
   const result = classifyIssue({
     repository: "Siltech-Consult/Report-Worker",

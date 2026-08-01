@@ -1,1 +1,81 @@
-{}
+{
+  "Siltech-Consult/Report-Worker#109": {
+    "Effort": "S",
+    "reason": "Detector e testes localizados para latencia de leitura do TempDB"
+  },
+  "Siltech-Consult/Report-Worker#110": {
+    "Effort": "S",
+    "reason": "Compatibilidade de parser com dois formatos e testes de regressao"
+  },
+  "Siltech-Consult/Report-Worker#111": {
+    "Effort": "M",
+    "reason": "Correlacao de multiplas fontes de protecao e estados inconclusivos"
+  },
+  "Siltech-Consult/Report-Worker#112": {
+    "Effort": "L",
+    "reason": "Correlacao canonica entre CMDB, SQL, Windows, aliases e multi-instancia"
+  },
+  "Siltech-Consult/Report-Worker#113": {
+    "Priority": "P1",
+    "Workflow": "Backlog",
+    "Effort": "XL",
+    "Wave": "Onda 1",
+    "reason": "Epico ativo que coordena incidentes P1 e qualidade de coleta da primeira entrega"
+  },
+  "Siltech-Consult/Report-Worker#114": {
+    "Effort": "M",
+    "reason": "Familia P2 de regras de integridade e seguranca"
+  },
+  "Siltech-Consult/Report-Worker#115": {
+    "Effort": "L",
+    "reason": "Modelo transversal de qualidade, completude e cards auditaveis"
+  },
+  "Siltech-Consult/Report-Worker#116": {
+    "Effort": "L",
+    "reason": "Familia P1 com regras, janelas, deduplicacao e evidencias"
+  },
+  "Siltech-Consult/Report-Worker#117": {
+    "Effort": "M",
+    "reason": "Familia P3 de configuracao, versao e higiene operacional"
+  },
+  "Siltech-Consult/Report-Worker#118": {
+    "Effort": "L",
+    "reason": "Persistencia longitudinal, recorrencia e reabertura de candidatos a indice"
+  },
+  "Siltech-Consult/SQLServer_Health#53": {
+    "Effort": "S",
+    "reason": "Sanitizacao de HTML e regressao com caracteres de controle"
+  },
+  "Siltech-Consult/SQLServer_Health#54": {
+    "Effort": "XS",
+    "reason": "Exposicao localizada de script_version no HTML"
+  },
+  "Siltech-Consult/SQLServer_Health#55": {
+    "Effort": "S",
+    "reason": "Tratamento best-effort de trace corrompido e testes"
+  },
+  "Siltech-Consult/SQLServer_Health#56": {
+    "Effort": "M",
+    "reason": "Definicao e validacao do contrato JSON composto"
+  },
+  "Siltech-Consult/SQLServer_Health#57": {
+    "Effort": "M",
+    "reason": "Regras de pareamento, idade e ciclo de envio de artefatos"
+  },
+  "Siltech-Consult/SQLServer_Health#58": {
+    "Effort": "XS",
+    "reason": "Inclusao localizada de metadata.modo nos JSONs particionados"
+  },
+  "Siltech-Consult/SQLServer_Health#59": {
+    "Effort": "S",
+    "reason": "Correcao localizada de taxonomia SQL e fixtures de mensagens reais"
+  },
+  "Siltech-Consult/Windows_Health#38": {
+    "Effort": "S",
+    "reason": "Coleta robusta de processos, isolamento por item e Pester"
+  },
+  "Siltech-Consult/Windows_Health#39": {
+    "Effort": "S",
+    "reason": "Fallback de IP por adaptador e cobertura de propriedades ausentes"
+  }
+}

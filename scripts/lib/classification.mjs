@@ -45,7 +45,9 @@ function priorityFromLabels(labels, rules) {
 }
 
 function priorityFromTitle(title, rules) {
-  const match = String(title ?? "").match(/^\s*(?:\[\s*(p[0-5])\s*\]|(p[0-5])\s*:)/i);
+  const match = String(title ?? "").match(
+    /^\s*(?:(?:\[[^\]]+\]\s*){0,3}\[\s*(p[0-5])\s*\]|(p[0-5])\s*(?::|-))/i
+  );
   if (!match) return undefined;
   const normalized = normalize(match[1] ?? match[2]);
   const priorities = (Array.isArray(rules.priorityLabels) ? rules.priorityLabels : [])
